@@ -3,3 +3,5 @@ huggingface_hub
 safetensors
 numpy
 jaxtyping
+PyYAML
+wandb

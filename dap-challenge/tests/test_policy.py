@@ -9,7 +9,7 @@ import torch
 from torch.distributions import Independent, Normal, TanhTransform, TransformedDistribution
 
 from models.architecture import GaussianParameters
-from models.dimensions import A, C_RGB, J
+from models.dimensions import A, C_RGB
 from models.policy import DapPolicy
 from models.distributions import sample_tanh_gaussian
 
@@ -21,7 +21,7 @@ class PolicyTests(unittest.TestCase):
         self.H_in, self.W_in = 24, 32
         self.model = DapPolicy(self.L)
         self.images = torch.randn(self.B, self.L, C_RGB, self.H_in, self.W_in)
-        self.positions = torch.rand(self.B, self.L, J) * 2 - 1
+        self.positions = torch.rand(self.B, self.L, A) * 2 - 1
 
     def test_shapes_and_history_configuration(self):
         parameters = self.model(self.images, self.positions)
@@ -37,7 +37,7 @@ class PolicyTests(unittest.TestCase):
         B, L, H_in, W_in = 1, 3, 17, 23
         other = DapPolicy(history_length=L)
         output = other(
-            torch.randn(B, L, C_RGB, H_in, W_in), torch.zeros(B, L, J)
+            torch.randn(B, L, C_RGB, H_in, W_in), torch.zeros(B, L, A)
         )
         self.assertEqual(output.mean.shape, (B, A))
 
@@ -145,7 +145,7 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.model(self.images[:, :1], self.positions[:, :1])
         with self.assertRaises(ValueError):
-            self.model(self.images, self.positions[:, :, : J - 1])
+            self.model(self.images, self.positions[:, :, : A - 1])
         with self.assertRaises(TypeError):
             self.model(self.images.to(torch.uint8), self.positions)
 

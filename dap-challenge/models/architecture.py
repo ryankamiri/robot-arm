@@ -11,7 +11,7 @@ import torch
 from jaxtyping import Float
 from torch import Tensor, nn
 
-from .dimensions import A, C_RGB, D_FUSION, D_IMG, D_OBS, D_POS, J
+from .dimensions import A, C_RGB, D_FUSION, D_IMG, D_OBS, D_POS
 
 
 class ResidualBlock(nn.Module):
@@ -98,7 +98,7 @@ class DapActorNetwork(nn.Module):
         self.history_length = history_length
         self.image_encoder = image_encoder
         self.position_encoder = nn.Sequential(
-            nn.Linear(J, D_POS),
+            nn.Linear(A, D_POS),
             nn.ReLU(),
             nn.Linear(D_POS, D_POS),
             nn.ReLU(),
@@ -115,9 +115,9 @@ class DapActorNetwork(nn.Module):
     def forward(
         self,
         images: Float[Tensor, "B L C_in H_in W_in"],
-        positions: Float[Tensor, "B L J"],
+        positions: Float[Tensor, "B L A"],
     ) -> GaussianParameters:
-        """Map images [B,L,C_in,H_in,W_in] and positions [B,L,J] to two [B,A] tensors."""
+        """Map images [B,L,C_in,H_in,W_in] and positions [B,L,A] to two [B,A] tensors."""
         if images.ndim != 5:
             raise ValueError("images must have shape [B, L, C_in, H_in, W_in]")
         B, L, C_in, H_in, W_in = images.shape
@@ -128,8 +128,8 @@ class DapActorNetwork(nn.Module):
                 f"expected L={self.history_length}, C_in={C_RGB}; "
                 f"got L={L}, C_in={C_in}"
             )
-        if positions.shape != (B, L, J):
-            raise ValueError(f"positions must match images with shape [B, L, J], J={J}")
+        if positions.shape != (B, L, A):
+            raise ValueError(f"positions must match images with shape [B, L, A], A={A}")
         if not images.is_floating_point() or not positions.is_floating_point():
             raise TypeError("images and positions must be floating-point tensors")
         if images.device != positions.device or images.dtype != positions.dtype:

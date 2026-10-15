@@ -1,0 +1,7 @@
+image_width: 224
+image_height: 168
+
+max_epochs: 50
+eval_every_steps: 100
+eval_at_end: true
+save_every_steps: 1

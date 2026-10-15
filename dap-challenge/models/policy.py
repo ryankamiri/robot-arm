@@ -1,7 +1,7 @@
 """Hugging Face-compatible actor interface, separate from robot execution.
 
 Shape symbols are defined in dimensions.py: B=batch, L=history, C_in=RGB
-channels, H_in/W_in=image size, J=position channels, A=action channels.
+channels, H_in/W_in=image size, A=position and action channels.
 """
 
 import math
@@ -27,7 +27,7 @@ class DapPolicy(
     value, and that value is saved in config.json along with the scale bounds.
 
     Inputs are already-preprocessed floating-point RGB images [B,L,C_in,H_in,W_in] and
-    normalized joint positions [B,L,J], in oldest-to-newest order. Returned
+    normalized joint positions [B,L,A], in oldest-to-newest order. Returned
     actions are normalized absolute targets, not physical controller commands.
     """
 
@@ -52,7 +52,7 @@ class DapPolicy(
     def forward(
         self,
         images: Float[Tensor, "B L C_in H_in W_in"],
-        positions: Float[Tensor, "B L J"],
+        positions: Float[Tensor, "B L A"],
     ) -> GaussianParameters:
         """Return pre-tanh mean and bounded log_std, both [B,A], without sampling."""
         parameters = self.network(images, positions)
@@ -64,7 +64,7 @@ class DapPolicy(
     def sample(
         self,
         images: Float[Tensor, "B L C_in H_in W_in"],
-        positions: Float[Tensor, "B L J"],
+        positions: Float[Tensor, "B L A"],
     ) -> ActionSample:
         """Return sampled normalized actions [B,A] and joint log_prob [B].
 
@@ -77,7 +77,7 @@ class DapPolicy(
     def deterministic_action(
         self,
         images: Float[Tensor, "B L C_in H_in W_in"],
-        positions: Float[Tensor, "B L J"],
+        positions: Float[Tensor, "B L A"],
     ) -> Float[Tensor, "B A"]:
         """Return tanh(mean) [B,A], not the exact mean of the transformed law."""
         return self(images, positions).mean.tanh()
