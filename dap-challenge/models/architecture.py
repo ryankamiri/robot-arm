@@ -1,9 +1,4 @@
-"""Observation fusion and Gaussian heads for the dap actor.
-
-The image encoder is supplied separately. This keeps the residual CNN distinct
-from the history/position fusion and from the action-distribution interface.
-See dimensions.py for the definitions of all symbolic tensor axes.
-"""
+"""Observation fusion and Gaussian heads for the dap actor."""
 
 from dataclasses import dataclass
 
@@ -44,12 +39,7 @@ class ResidualBlock(nn.Module):
 
 
 class ImageEncoder(nn.Module):
-    """RGB image -> residual stages -> global pooling -> 128 features.
-
-    Every stage downsamples by two. Adaptive pooling avoids selecting a fixed
-    camera resolution here; training and deployment still need matching image
-    preprocessing. Parameters use the standard PyTorch layer initialization.
-    """
+    """RGB image -> residual stages -> global pooling -> 128 features."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -76,17 +66,7 @@ class GaussianParameters:
 
 
 class DapActorNetwork(nn.Module):
-    """Encode each observation, flatten history, and predict Gaussian parameters.
-
-    Args:
-        image_encoder: Shared encoder mapping [N, C_in, H_in, W_in] to [N, D_IMG].
-        history_length: Total observations per window, including the current one.
-            Required explicitly because the project's history length is open.
-
-    Images must already be floating-point tensors in the caller's chosen image
-    preprocessing convention. Positions must already use the selected [-1, 1]
-    representation. This network does not read sensors or command the robot.
-    """
+    """Encode each observation, flatten history, and predict Gaussian parameters."""
 
     def __init__(self, image_encoder: nn.Module, history_length: int) -> None:
         super().__init__()
@@ -120,6 +100,7 @@ class DapActorNetwork(nn.Module):
         """Map images [B,L,C_in,H_in,W_in] and positions [B,L,A] to two [B,A] tensors."""
         if images.ndim != 5:
             raise ValueError("images must have shape [B, L, C_in, H_in, W_in]")
+
         B, L, C_in, H_in, W_in = images.shape
         if B < 1 or H_in < 1 or W_in < 1:
             raise ValueError("image batch and spatial dimensions must be positive")
@@ -144,6 +125,7 @@ class DapActorNetwork(nn.Module):
             raise ValueError(
                 f"image_encoder must return [N, D_IMG], N=B*L and D_IMG={D_IMG}"
             )
+
         image_features: Float[Tensor, "B L D_IMG"] = encoded_images.reshape(
             B, L, D_IMG
         )

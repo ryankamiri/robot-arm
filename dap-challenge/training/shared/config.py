@@ -1,8 +1,4 @@
-"""YAML configuration I/O shared by BC and future RL entry points.
-
-These helpers validate portable configuration structure, not algorithm-specific
-settings. BC and SAC will validate their own fields when their loops are built.
-"""
+"""YAML configuration I/O shared by BC and future RL entry points."""
 
 import json
 from pathlib import Path
@@ -20,6 +16,7 @@ def _plain_config(config: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(value, Mapping):
             if not all(isinstance(key, str) for key in value):
                 raise ValueError("configuration keys must be strings")
+
             for child in value.values():
                 validate(child)
         elif isinstance(value, list):

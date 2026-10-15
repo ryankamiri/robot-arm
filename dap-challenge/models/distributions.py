@@ -1,7 +1,4 @@
-"""Differentiable tanh-Gaussian sampling in normalized action coordinates.
-
-B is batch size and A is action channels; see dimensions.py for fixed values.
-"""
+"""Differentiable tanh-Gaussian sampling in normalized action coordinates."""
 
 from dataclasses import dataclass
 import math
@@ -16,11 +13,7 @@ from .architecture import GaussianParameters
 
 @dataclass
 class ActionSample:
-    """A single action per example, with its density under the actor.
-
-    actions and pre_tanh have shape [B, A]. log_prob has shape [B] after
-    summing log densities over the six independent base-Gaussian channels.
-    """
+    """A single action per example, with its density under the actor."""
 
     actions: Float[Tensor, "B A"]
     log_prob: Float[Tensor, "B"]
@@ -28,13 +21,7 @@ class ActionSample:
 
 
 def sample_tanh_gaussian(parameters: GaussianParameters) -> ActionSample:
-    """Reparameterized sampling; gradients reach both Gaussian parameter heads.
-
-    Compute the change-of-variables correction from the pre-tanh sample instead
-    of inverting the bounded action. This remains stable when floating-point
-    tanh rounds a large latent sample to exactly -1 or 1. No action clipping or
-    arbitrary epsilon is needed for log probabilities of our own samples.
-    """
+    """Reparameterized sampling; gradients reach both Gaussian parameter heads."""
     distribution = Normal(parameters.mean, parameters.log_std.exp())
     pre_tanh: Float[Tensor, "B A"] = distribution.rsample()
     actions: Float[Tensor, "B A"] = pre_tanh.tanh()

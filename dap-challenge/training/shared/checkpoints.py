@@ -1,9 +1,4 @@
-"""Training-state checkpoints, separate from inference-only Hub policy exports.
-
-Callers supply named models/optimizers, counters and the output path. The same
-helpers can therefore handle a BC actor or an RL actor plus critics. They do not
-choose checkpoint frequency, filename conventions or retention policy.
-"""
+"""Training-state checkpoints, separate from inference-only Hub policy exports."""
 
 from dataclasses import dataclass
 import os
@@ -31,11 +26,7 @@ class CheckpointState:
 
 
 def capture_rng_state() -> dict[str, Any]:
-    """Capture Python, NumPy legacy, CPU Torch and available GPU RNG state.
-
-    Independently created NumPy/Torch generators belong in caller-supplied
-    extra_state. N_rng is the backend-specific length of a byte RNG-state tensor.
-    """
+    """Capture Python, NumPy legacy, CPU Torch and available GPU RNG state."""
     generator, keys, position, has_gauss, cached_gaussian = np.random.get_state()
     cpu: UInt8[Tensor, "N_rng"] = torch.get_rng_state()
     cuda: list[UInt8[Tensor, "N_rng"]] | None = (
@@ -95,14 +86,7 @@ def save_checkpoint(
     progress: Mapping[str, int],
     extra_state: Mapping[str, Any] | None = None,
 ) -> Path:
-    """Atomically save state at the caller's explicit path, replacing that path.
-
-    progress holds caller-defined nonnegative integer counters, such as completed
-    optimizer updates/epochs. extra_state can hold sampler position/order, split
-    IDs, W&B run ID, scheduler state, or other tensor/builtin-container state.
-    Data-loader/replay/environment state is not inferred or captured implicitly;
-    a complete resume requires the future trainer to provide relevant state.
-    """
+    """Atomically save state at the caller's explicit path, replacing that path."""
     if not models:
         raise ValueError("at least one named model is required")
     if any(
@@ -146,13 +130,7 @@ def load_checkpoint(
     optimizers: Mapping[str, Optimizer],
     restore_rng: bool = True,
 ) -> CheckpointState:
-    """Strictly restore into supplied objects, then return config/counters/extra.
-
-    Instantiate models on the desired device and create their optimizers first.
-    Loading maps serialized tensors through CPU; optimizer loading handles their
-    parameter devices. Set restore_rng=False for transfer across GPU backends.
-    The file uses state dicts and builtins, loaded with weights_only=True.
-    """
+    """Strictly restore into supplied objects, then return config/counters/extra."""
     payload = torch.load(path, map_location="cpu", weights_only=True)
     if payload.get("format_version") != 1:
         raise ValueError("unsupported checkpoint format_version")
@@ -160,6 +138,7 @@ def load_checkpoint(
         raise ValueError("model names do not match the checkpoint")
     if set(optimizers) != set(payload["optimizers"]):
         raise ValueError("optimizer names do not match the checkpoint")
+
     for name, model in models.items():
         model.load_state_dict(payload["models"][name], strict=True)
         model.train(payload["model_training"][name])

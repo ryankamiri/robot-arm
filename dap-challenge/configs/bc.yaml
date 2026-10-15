@@ -1,7 +1,21 @@
-image_width: 224
-image_height: 168
+dataset:
+  root: dap-challenge/data
+  validation_fraction: 0.2
 
-max_epochs: 50
-eval_every_steps: 100
-eval_at_end: true
-save_every_steps: 1
+preprocessing:
+  image_width: 224
+  image_height: 168
+
+model:
+  history_length: 3
+
+training:
+  batch_size: 32
+  max_epochs: 50
+
+  evaluation:
+    every_steps: 100
+    at_end: true
+
+  checkpoint:
+    every_steps: 1
