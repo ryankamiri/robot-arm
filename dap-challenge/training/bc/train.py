@@ -71,10 +71,16 @@ def validate_config(config: Mapping[str, Any]) -> None:
 
 def train(
     config: dict[str, Any], output: str | Path, device: str,
-    wandb_project: str, wandb_mode: str, resume: str | Path | None = None,
+    wandb_project: str | None = None, wandb_mode: str | None = None, resume: str | Path | None = None,
 ) -> Path:
     """Train locally; explicit output/device/tracking settings avoid hidden run defaults."""
     validate_config(config)
+    tracking = config.get('wandb', {})
+    wandb_project = wandb_project or tracking.get('project')
+    wandb_mode = wandb_mode or tracking.get('mode')
+    if not wandb_project or not wandb_mode:
+        raise ValueError('provide W&B project and mode in config or CLI')
+
     output = Path(output).resolve()
     target_device = torch.device(device)
     settings = config['training']
@@ -105,7 +111,8 @@ def train(
 
     epsilon = settings['loss']['endpoint_epsilon']
     run = start_run(wandb_project, config, wandb_mode, output, run_id=previous_run_id,
-                    resume='must' if previous_run_id is not None and wandb_mode == 'online' else None)
+                    resume='must' if previous_run_id is not None and wandb_mode == 'online' else None,
+                    entity=tracking.get('entity'), name=tracking.get('name'))
     last_evaluation_step = None
 
     def checkpoint(path: Path) -> None:
@@ -165,8 +172,8 @@ def main() -> None:
     parser.add_argument('--config', default='dap-challenge/configs/bc.yaml')
     parser.add_argument('--output', required=True)
     parser.add_argument('--device', required=True, choices=('cpu', 'mps', 'cuda'))
-    parser.add_argument('--wandb-project', required=True)
-    parser.add_argument('--wandb-mode', required=True, choices=('online', 'offline', 'disabled'))
+    parser.add_argument('--wandb-project')
+    parser.add_argument('--wandb-mode', choices=('online', 'offline', 'disabled'))
     parser.add_argument('--resume')
     args = parser.parse_args()
     train(load_config(args.config), args.output, args.device, args.wandb_project, args.wandb_mode, args.resume)
