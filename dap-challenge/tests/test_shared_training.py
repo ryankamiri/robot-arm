@@ -13,13 +13,12 @@ from torch import Tensor, nn
 from torch.optim import AdamW
 
 from training.shared.checkpoints import (
-    capture_rng_state,
     load_checkpoint,
-    restore_rng_state,
     save_checkpoint,
 )
 from training.shared.config import load_config, save_config
 from training.shared.metrics import log_metrics, start_run
+from training.shared.randomness import capture_rng_state, restore_rng_state, seed_training
 
 
 class SharedTrainingTests(unittest.TestCase):
@@ -92,9 +91,7 @@ class SharedTrainingTests(unittest.TestCase):
                 load_checkpoint(path, {"wrong_name": restored["actor"]}, restored_optimizers)
 
     def test_rng_round_trip_includes_python_numpy_torch_and_available_gpus(self):
-        random.seed(12)
-        np.random.seed(12)
-        torch.manual_seed(12)
+        seed_training(12)
         state = capture_rng_state()
         python_expected = random.random()
         numpy_expected = np.random.random()

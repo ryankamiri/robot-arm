@@ -6,3 +6,4 @@ wandb/
 /dap-challenge/data/
 node_modules/
 /dap-challenge/viewer/dist/
+/dap-challenge/runs/
