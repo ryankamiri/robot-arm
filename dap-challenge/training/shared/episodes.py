@@ -14,6 +14,7 @@ from torch import Tensor
 
 from models.dimensions import A
 from .observations import preprocess_image
+from .normalization import normalize_controller
 
 
 @dataclass
@@ -59,11 +60,11 @@ def _video_frames(path: Path) -> Iterator[UInt8[Tensor, "H_src W_src C_in"]]:
 def load_episode(
     directory: str | Path, image_width: int, image_height: int
 ) -> Episode:
-    """Validate an episode and load its already-normalized observations/targets."""
+    """Validate an episode and normalize calibrated observations and targets only during loading."""
     directory = Path(directory)
     metadata = json.loads((directory / "metadata.json").read_text())
-    if not isinstance(metadata, dict) or metadata.get("schema_version") != 1:
-        raise ValueError("metadata must declare schema_version=1")
+    if not isinstance(metadata, dict) or metadata.get("schema_version") != 2:
+        raise ValueError("metadata must declare schema_version=2")
 
     episode_id = metadata.get("episode_id")
     if not isinstance(episode_id, str) or not episode_id:
@@ -74,8 +75,12 @@ def load_episode(
             or not all(isinstance(name, str) and name for name in joint_names)
             or len(set(joint_names)) != A):
         raise ValueError(f"joint_names must list A={A} unique names in model order")
-    if metadata.get("normalized") is not True:
-        raise ValueError("metadata must declare normalized=true for positions and actions")
+    if metadata.get("normalized") is not False or metadata.get("controller_convention") != "lerobot_range":
+        raise ValueError("metadata must declare normalized=false and controller_convention=lerobot_range")
+    if not isinstance(metadata.get("calibration"), dict):
+        raise ValueError("metadata must preserve calibration information")
+    if metadata.get("status") != "accepted":
+        raise ValueError("only accepted episodes can be loaded for training")
 
     # Construct directly from the local Arrow table: no Hub request/cache build.
     table = Dataset(pq.read_table(directory / "steps.parquet"))
@@ -131,8 +136,11 @@ def load_episode(
     positions: Float[Tensor, "T A"] = torch.tensor(columns["positions"], dtype=torch.float32)
     actions: Float[Tensor, "T A"] = torch.tensor(columns["actions"], dtype=torch.float32)
     for name, values in (("positions", positions), ("actions", actions)):
-        if values.shape != (T, A) or not torch.isfinite(values).all() or (values.abs() > 1).any():
-            raise ValueError(f"{name} must be finite normalized values [T,A], A={A}, in [-1,1]")
+        if values.shape != (T, A) or not torch.isfinite(values).all():
+            raise ValueError(f"{name} must be finite calibrated values [T,A], A={A}")
+
+    positions = normalize_controller(positions, joint_names)
+    actions = normalize_controller(actions, joint_names)
 
     decoded: list[Float[Tensor, "C_in H_in W_in"]] = [
         preprocess_image(frame, image_width, image_height)

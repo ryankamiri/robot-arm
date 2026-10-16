@@ -1,0 +1,168 @@
+"""Local FastAPI recorder API; start with python -m recording.server."""
+
+import argparse
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Annotated
+from urllib.parse import urlparse
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, model_validator
+from serial.tools.list_ports import comports
+import uvicorn
+
+from recording.session import RecorderSession
+from training.shared.devices import DemoDevices, SO101Devices
+from training.shared.config import load_config
+
+PROJECT = Path(__file__).resolve().parents[1]
+
+
+class ConnectionSettings(BaseModel):
+    leader_port: str = ''
+    follower_port: str = ''
+    leader_id: str = ''
+    follower_id: str = ''
+    calibration_dir: str | None = None
+    camera_index: Annotated[int, Field(ge=0)] = 0
+    width: Annotated[int, Field(gt=0)]
+    height: Annotated[int, Field(gt=0)]
+    camera_fps: Annotated[int, Field(gt=0)] = 30
+
+    @model_validator(mode='after')
+    def validate_dimensions(self):
+        if self.width % 2 or self.height % 2:
+            raise ValueError('H.264 yuv420p requires even capture width and height')
+
+        return self
+
+
+class CameraSettings(BaseModel):
+    camera_index: Annotated[int, Field(ge=0)]
+
+
+class EpisodeSelection(BaseModel):
+    episode_id: str
+
+
+def create_app(session: RecorderSession | None = None, demo: bool = False) -> FastAPI:
+    config = load_config(PROJECT / 'configs' / 'bc.yaml')
+    root = PROJECT.parent / config['dataset']['root']
+    if demo:
+        root = root / '.demo'
+    if not session:
+        session = RecorderSession(root, (lambda config: DemoDevices()) if demo else SO101Devices)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        session.start()
+        try:
+            yield
+        finally:
+            session.close()
+
+    app = FastAPI(lifespan=lifespan)
+
+    @app.middleware('http')
+    async def local_commands_only(request: Request, call_next):
+        origin = request.headers.get('origin')
+        if request.method == 'POST' and origin and urlparse(origin).hostname not in ('localhost', '127.0.0.1'):
+            return JSONResponse({'detail': 'Recorder commands must come from the local app.'}, status_code=403)
+
+        return await call_next(request)
+
+    def execute(command: str, payload: dict | None = None):
+        try:
+            return session.request(command, payload)
+        except FileNotFoundError as error:
+            raise HTTPException(404, str(error)) from error
+        except (ValueError, KeyError) as error:
+            raise HTTPException(409, str(error)) from error
+        except Exception as error:
+            raise HTTPException(503, str(error)) from error
+
+    @app.get('/api/status')
+    def status():
+        return {**session.snapshot(), 'demo': demo}
+
+    @app.get('/api/ports')
+    def ports():
+        return [{'port': port.device, 'description': port.description} for port in comports()]
+
+    @app.post('/api/camera/inspect')
+    def camera(settings: CameraSettings):
+        return execute('inspect_camera', settings.model_dump())
+
+    @app.post('/api/connect')
+    def connect(settings: ConnectionSettings):
+        if not demo and (not all((settings.leader_port.strip(), settings.follower_port.strip(),
+                                 settings.leader_id.strip(), settings.follower_id.strip()))
+                         or settings.leader_port == settings.follower_port):
+            raise HTTPException(422, 'Provide distinct arm ports and both calibrated arm IDs.')
+
+        return execute('connect', settings.model_dump())
+
+    @app.post('/api/recording/start')
+    def start():
+        return execute('start')
+
+    @app.post('/api/recording/stop')
+    def stop():
+        return execute('stop')
+
+    @app.post('/api/disconnect')
+    def disconnect():
+        return execute('disconnect')
+
+    @app.post('/api/reset/ready')
+    def ready():
+        return execute('ready')
+
+    @app.post('/api/episodes/keep')
+    def keep(selection: EpisodeSelection):
+        return execute('keep', selection.model_dump())
+
+    @app.post('/api/episodes/discard')
+    def discard(selection: EpisodeSelection):
+        return execute('discard', selection.model_dump())
+
+    @app.get('/api/episodes/{episode_id}/video')
+    def video(episode_id: str):
+        try:
+            metadata = session.store.metadata(episode_id)
+            if metadata['status'] == 'recording':
+                raise HTTPException(409, 'Stop recording before previewing the video.')
+
+            path = session.store.path(episode_id) / 'video.mp4'
+            if not path.is_file():
+                raise HTTPException(404, 'This incomplete take has no playable video.')
+
+            return FileResponse(path, media_type='video/mp4')
+        except (FileNotFoundError, ValueError) as error:
+            raise HTTPException(404, str(error)) from error
+
+    dist = PROJECT / 'viewer' / 'dist'
+    if dist.is_dir():
+        app.mount('/assets', StaticFiles(directory=dist / 'assets'), name='assets')
+
+        @app.get('/record/bc')
+        @app.get('/')
+        def viewer():
+            return FileResponse(dist / 'index.html')
+
+    return app
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--demo', action='store_true', help='Use synthetic devices, never physical hardware.')
+    parser.add_argument('--port', type=int, default=8000)
+    args = parser.parse_args()
+
+    uvicorn.run(create_app(demo=args.demo), host='127.0.0.1', port=args.port, workers=1)
+
+
+if __name__ == '__main__':
+    main()

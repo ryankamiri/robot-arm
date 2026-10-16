@@ -1,0 +1,11 @@
+:root { font-family: system-ui, sans-serif; color-scheme: light dark; }
+body { margin: 0; }
+main { max-width: 800px; margin: 32px auto; padding: 0 20px; }
+fieldset, section { margin: 24px 0; }
+label { display: block; margin: 12px 0; }
+input { margin-left: 12px; }
+button, input, select { font: inherit; padding: 6px 10px; }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; }
+video { display: block; width: 100%; max-height: 480px; margin: 16px 0; background: #111; }
+pre { white-space: pre-wrap; }
+[role="alert"] { color: #c33; }

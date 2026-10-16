@@ -4,3 +4,5 @@ __pycache__/
 *.py[cod]
 wandb/
 /dap-challenge/data/
+node_modules/
+/dap-challenge/viewer/dist/

@@ -15,6 +15,7 @@ import torch
 from torch import Tensor
 
 from models.dimensions import A, C_RGB
+from training.shared.normalization import JOINT_NAMES, denormalize_controller
 from models.policy import DapPolicy
 from training.bc.dataset import BCDataset, create_dataloaders
 from training.shared.config import load_config
@@ -56,12 +57,17 @@ class BCDatasetTests(unittest.TestCase):
             "positions": [[index / 10] * A for index in range(T)],
             "actions": [[-1 + 2 * index / max(T - 1, 1)] * A for index in range(T)],
         }
+        for column_name in ("positions", "actions"):
+            table[column_name] = denormalize_controller(torch.tensor(table[column_name]), JOINT_NAMES).tolist()
         pq.write_table(pa.table(table), path / "steps.parquet")
         (path / "metadata.json").write_text(json.dumps({
-            "schema_version": 1,
+            "schema_version": 2,
             "episode_id": name,
-            "joint_names": [f"joint_{index}" for index in range(A)],
-            "normalized": True,
+            "joint_names": list(JOINT_NAMES),
+            "normalized": False,
+            "controller_convention": "lerobot_range",
+            "calibration": {"source": "synthetic test fixture"},
+            "status": "accepted",
         }))
         return path
 
@@ -127,7 +133,7 @@ class BCDatasetTests(unittest.TestCase):
         mutations = (
             {"camera_timestamp_s": [0.5, 0.1, 0.2, 0.3]},
             {"frame_index": [0, 1, 2, 99]},
-            {"positions": [[100.0] * A] * 4},
+            {"positions": [[200.0] * A] * 4},
             {"action_timestamp_s": [0.0, 0.12, 0.22, 0.32]},
             {"time_index": [0, 1, 3, 4]},
             {"frame_index": [0.0, 1.0, 2.0, 3.0]},
@@ -143,7 +149,7 @@ class BCDatasetTests(unittest.TestCase):
         path = self.write_episode("episode_0")
         metadata_path = path / "metadata.json"
         metadata = json.loads(metadata_path.read_text())
-        metadata["normalized"] = False
+        metadata["normalized"] = True
         metadata_path.write_text(json.dumps(metadata))
         with self.assertRaises(ValueError):
             load_episode(path, 8, 6)
