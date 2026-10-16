@@ -2,6 +2,9 @@ import { useEffect, useState, type FormEvent } from 'react';
 
 type Take = {
   episode_id: string;
+  name?: string;
+  notes?: string;
+  mac_camera?: { index: number } | null;
   status: string;
   row_count: number;
   error: string | null;
@@ -33,6 +36,9 @@ export function Recorder() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState('');
+  const [episodeName, setEpisodeName] = useState('');
+  const [episodeNotes, setEpisodeNotes] = useState('');
+  const [lastKept, setLastKept] = useState('');
   const [videoError, setVideoError] = useState(false);
   const [ports, setPorts] = useState<{ port: string; description: string; serial?: string | null }[]>([]);
   const [cameras, setCameras] = useState<{ index: number; name: string; device_id: string }[]>([]);
@@ -42,7 +48,7 @@ export function Recorder() {
   const [countdown, setCountdown] = useState<number | null>(null);
   const [form, setForm] = useState({
     leader_port: '', follower_port: '', leader_id: '', follower_id: '',
-    calibration_dir: '', camera_index: '', width: '640', height: '480', camera_fps: '30',
+    calibration_dir: '', camera_index: '', mac_camera_index: '', width: '640', height: '480', camera_fps: '30',
   });
 
   useEffect(() => {
@@ -89,7 +95,11 @@ export function Recorder() {
 
   const takeId = selected || status?.active_episode_id || '';
   const take = status?.pending.find(entry => entry.episode_id === takeId);
-  useEffect(() => setVideoError(false), [takeId]);
+  useEffect(() => {
+    setVideoError(false);
+    setEpisodeName(take?.name ?? '');
+    setEpisodeNotes(take?.notes ?? '');
+  }, [takeId]);
 
   async function action(path: string, body: unknown = {}) {
     setBusy(true);
@@ -97,6 +107,7 @@ export function Recorder() {
     try {
       const next = await api(path, body);
       setStatus(previous => ({ ...next, demo: previous?.demo ?? next.demo }));
+      if (path.endsWith('/keep')) setLastKept(episodeName.trim() || takeId);
       if (path.endsWith('/keep') || path.endsWith('/discard')) setSelected('');
     } catch (failure) {
       setError(String(failure));
@@ -130,6 +141,8 @@ export function Recorder() {
       leader_serial: ports.find(port => port.port === form.leader_port)?.serial ?? null,
       follower_serial: ports.find(port => port.port === form.follower_port)?.serial ?? null,
       camera_device_id: cameras.find(camera => camera.index === Number(form.camera_index))?.device_id ?? null,
+      mac_camera_device_id: cameras.find(camera => camera.index === Number(form.mac_camera_index))?.device_id ?? null,
+      mac_camera_index: form.mac_camera_index === '' ? null : Number(form.mac_camera_index),
       camera_index: Number(form.camera_index),
       width: Number(form.width || (status?.demo ? 320 : 0)),
       height: Number(form.height || (status?.demo ? 240 : 0)), camera_fps: Number(form.camera_fps),
@@ -171,11 +184,19 @@ export function Recorder() {
           </label>,
         )}
         <p>Use the IDs you calibrated with LeRobot. Existing calibration is required.</p>
-        <label>Camera
+        <label>Arm camera
           <select aria-label="Camera" required={!status?.demo} value={form.camera_index}
             onChange={event => setForm({ ...form, camera_index: event.target.value })}>
             <option value="">Select a camera</option>
             {cameras.map(camera => <option key={camera.device_id} value={camera.index}>{camera.name} · index {camera.index}</option>)}
+          </select>
+        </label>
+        <label>Mac camera
+          <select aria-label="Mac camera" required={!status?.demo} value={form.mac_camera_index}
+            onChange={event => setForm({ ...form, mac_camera_index: event.target.value })}>
+            <option value="">Select the Mac camera</option>
+            {cameras.filter(camera => String(camera.index) !== form.camera_index).map(camera =>
+              <option key={camera.device_id} value={camera.index}>{camera.name} · index {camera.index}</option>)}
           </select>
         </label>
         {(['width', 'height', 'camera_fps'] as const).map(key =>
@@ -210,20 +231,34 @@ export function Recorder() {
 
     {status && status.phase !== 'recording' && status.phase !== 'finalizing' && <section>
       <h2>Review</h2>
+      {lastKept && <p role="status">Saved episode: {lastKept}</p>}
       <select aria-label="Pending take" value={takeId} disabled={busy} onChange={event => setSelected(event.target.value)}>
         <option value="">Select a pending take</option>
-        {status.pending.map(entry => <option key={entry.episode_id} value={entry.episode_id}>{entry.episode_id} · {entry.status}</option>)}
+        {status.pending.map(entry => <option key={entry.episode_id} value={entry.episode_id}>{entry.name || entry.episode_id} · {entry.status}</option>)}
       </select>
       {take?.status === 'recording' && <p>Finalizing pending take…</p>}
       {take && take.status !== 'recording' && <>
         <p>{take.status} · {take.row_count ?? 0} observations</p>
         {take.error && <p role="alert">{take.error}</p>}
+        <h3>Arm camera</h3>
         <video key={takeId} controls preload="metadata" src={`/api/episodes/${encodeURIComponent(takeId)}/video`}
           onError={() => setVideoError(true)} />
+        {take.mac_camera && <>
+          <h3>Mac camera</h3>
+          <video key={`${takeId}-mac`} controls preload="metadata"
+            src={`/api/episodes/${encodeURIComponent(takeId)}/video?camera=mac`}
+            onError={() => setVideoError(true)} />
+        </>}
         {videoError && <p role="alert">Video could not be played. The pending files remain preserved.</p>}
         <p>Take missed deadlines: {take.diagnostics?.missed_deadlines ?? 'unavailable'} · Repeated camera frames: {take.diagnostics?.repeated_frames ?? 'unavailable'}</p>
+        <label>Episode name (optional)
+          <input value={episodeName} disabled={busy} onChange={event => setEpisodeName(event.target.value)} />
+        </label>
+        <label>Notes (optional)
+          <textarea value={episodeNotes} disabled={busy} rows={3} onChange={event => setEpisodeNotes(event.target.value)} />
+        </label>
         <div className="actions">
-          <button disabled={busy || take.status !== 'review' || videoError} onClick={() => void action('episodes/keep', { episode_id: takeId })}>Keep</button>
+          <button disabled={busy || take.status !== 'review' || videoError} onClick={() => void action('episodes/keep', { episode_id: takeId, name: episodeName, notes: episodeNotes })}>Keep</button>
           <button disabled={busy} onClick={() => void action('episodes/discard', { episode_id: takeId })}>Discard</button>
         </div>
         {take.status === 'incomplete' && <p>Incomplete takes are preserved for inspection and cannot enter training data.</p>}

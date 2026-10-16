@@ -93,6 +93,15 @@ class CameraTests(unittest.TestCase):
         self.assertEqual(camera.read().rgb.shape, (8, 6, 3))
         self.assertTrue(camera.read().rgb.flags.c_contiguous)
 
+    def test_named_capture_is_passed_to_avfoundation_without_index_conversion(self):
+        camera = CameraCapture('MacBook Pro Camera', 8, 6, 30)
+        with patch('training.shared.devices.open_camera') as opened:
+            opened.return_value.__enter__.return_value = self.container()
+            with patch('training.shared.devices.camera_frames', return_value=iter([self.frame()])):
+                camera._capture()
+        opened.assert_called_once_with('MacBook Pro Camera', 8, 6, 30)
+        self.assertEqual(camera.read().rgb.shape, (6, 8, 3))
+
     def test_wrong_capture_dimensions_are_rejected_before_recording(self):
         camera = CameraCapture(0, 8, 6, 30)
         with patch('training.shared.devices.open_camera') as opened:

@@ -1,7 +1,7 @@
 import AVFoundation
 import Foundation
 
-// Match FFmpeg AVFoundation's video-device enumeration order.
+// Enumerate identities for selection; capture opens devices by unambiguous name.
 let devices = AVCaptureDevice.devices(for: .video)
 let cameras: [[String: Any]] = devices.enumerated().map { index, device in
     ["index": index, "name": device.localizedName, "device_id": device.uniqueID]

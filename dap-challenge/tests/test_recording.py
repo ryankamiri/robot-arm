@@ -44,6 +44,21 @@ class ControlledDevices(DemoDevices):
         self.closed = True
 
 
+class DualCameraDevices(ControlledDevices):
+    def connect(self):
+        metadata = super().connect()
+        metadata['mac_camera'] = {'width': 320, 'height': 240, 'timestamp_basis': 'synthetic_host_monotonic'}
+        return metadata
+
+    def observe(self):
+        result = super().observe()
+        self.mac_frame = result[0]
+        return result
+
+    def secondary_frame(self):
+        return self.mac_frame
+
+
 class RecordingTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -78,6 +93,49 @@ class RecordingTests(unittest.TestCase):
         self.wait_for(lambda state: state['recorded_rows'] >= 4)
         self.post('recording/stop')
         return episode_id
+
+    def test_two_camera_recording_saves_previews_and_keeps_both_videos(self):
+        self.session.factory = lambda config: DualCameraDevices()
+        self.connect()
+        episode_id = self.record()
+        pending = self.session.store.path(episode_id)
+        rows = pq.read_table(pending / 'steps.parquet').to_pydict()
+        self.assertEqual(len(rows['mac_frame_index']), len(rows['frame_index']))
+        self.assertTrue(all(m <= t for m, t in zip(rows['mac_camera_timestamp_s'], rows['timestamp_s'])))
+        for query, filename in [('', 'video.mp4'), ('?camera=mac', 'mac_video.mp4')]:
+            response = self.client.get(f'/api/episodes/{episode_id}/video{query}')
+            self.assertEqual(response.status_code, 200)
+            with av.open(str(pending / filename)) as video:
+                frames = list(video.decode(video=0))
+                self.assertGreater(len(frames), 0)
+        self.post('episodes/keep', {'episode_id': episode_id, 'name': 'Two views'})
+        accepted = self.root / episode_id
+        self.assertTrue((accepted / 'mac_video.mp4').exists())
+        metadata = json.loads((accepted / 'metadata.json').read_text())
+        self.assertEqual(metadata['mac_camera']['video_file'], 'mac_video.mp4')
+
+    def test_two_camera_take_cannot_be_kept_if_mac_video_is_missing(self):
+        self.session.factory = lambda config: DualCameraDevices()
+        self.connect()
+        episode_id = self.record()
+        (self.session.store.path(episode_id) / 'mac_video.mp4').unlink()
+        response = self.client.post('/api/episodes/keep', json={'episode_id': episode_id})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.session.store.metadata(episode_id)['status'], 'review')
+
+    def test_keep_preserves_optional_name_and_notes_without_renaming_directory(self):
+        self.connect()
+        episode_id = self.record()
+        self.post('episodes/keep', {'episode_id': episode_id, 'name': '  First clean dap  ',
+                                  'notes': '  Slow approach; good contact.  '})
+        accepted = self.root / episode_id
+        metadata = json.loads((accepted / 'metadata.json').read_text())
+        self.assertEqual(metadata['name'], 'First clean dap')
+        self.assertEqual(metadata['notes'], 'Slow approach; good contact.')
+        self.assertEqual(metadata['episode_id'], episode_id)
+        self.assertEqual(metadata['status'], 'accepted')
+        self.assertTrue((accepted / 'video.mp4').exists())
+        self.assertEqual(discover_episodes(self.root), [accepted])
 
     def test_keep_roundtrip_stores_sent_controller_targets_and_normalizes_on_load(self):
         self.connect()

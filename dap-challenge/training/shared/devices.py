@@ -29,18 +29,21 @@ class CameraFrame:
 class Devices(Protocol):
     def connect(self) -> dict[str, Any]: ...
     def observe(self) -> tuple[CameraFrame, list[float], float]: ...
+    def secondary_frame(self) -> CameraFrame | None: ...
     def command(self) -> list[float]: ...
     def disconnect(self) -> None: ...
 
 
 def open_camera(
-    index: int, width: int | None = None, height: int | None = None, fps: int | None = None,
+    index: int | str, width: int | None = None, height: int | None = None, fps: int | None = None,
 ) -> InputContainer:
     """Open a macOS video device through PyAV without opening an audio device."""
     if sys.platform != 'darwin':
         raise RuntimeError('Camera capture currently supports macOS AVFoundation only.')
-    if index < 0:
+    if isinstance(index, int) and index < 0:
         raise ValueError('camera index must be nonnegative')
+    if isinstance(index, str) and (not index or ':' in index):
+        raise ValueError('camera name must be nonempty and contain no colon')
     if (width is None) != (height is None):
         raise ValueError('specify both capture width and height')
 
@@ -86,7 +89,7 @@ def reported_camera_rate(capture: InputContainer) -> float | None:
 
 
 class CameraCapture:
-    def __init__(self, index: int, width: int, height: int, fps: int, rotation_clockwise: int = 0):
+    def __init__(self, index: int | str, width: int, height: int, fps: int, rotation_clockwise: int = 0):
         if rotation_clockwise not in (0, 90, 180, 270):
             raise ValueError('camera rotation must be 0, 90, 180 or 270 degrees')
 
@@ -150,6 +153,8 @@ class SO101Devices:
     def __init__(self, settings: dict[str, Any]):
         self.settings = settings
         self.camera = None
+        self.mac_camera = None
+        self.mac_frame = None
         self.leader = None
         self.follower = None
 
@@ -167,9 +172,15 @@ class SO101Devices:
             raise ValueError('Calibrate both arm IDs with LeRobot first; web connections never prompt for calibration.')
 
         try:
-            self.camera = CameraCapture(config['camera_index'], config['width'], config['height'], config['camera_fps'],
+            self.camera = CameraCapture(config.get('camera_name', config['camera_index']), config['width'], config['height'], config['camera_fps'],
                                         config.get('rotation_clockwise', 90))
             self.camera.connect()
+            if config.get('mac_camera_index') is not None:
+                if config['mac_camera_index'] == config['camera_index']:
+                    raise ValueError('Arm and Mac cameras must be different devices.')
+
+                self.mac_camera = CameraCapture(config.get('mac_camera_name', config['mac_camera_index']), config['width'], config['height'], config['camera_fps'])
+                self.mac_camera.connect()
             self.leader.connect(calibrate=False)
             if not self.leader.is_calibrated:
                 raise ValueError('leader calibration does not match the connected motors')
@@ -186,7 +197,7 @@ class SO101Devices:
                     'leader': {name: asdict(value) for name, value in self.leader.calibration.items()},
                     'follower': {name: asdict(value) for name, value in self.follower.calibration.items()},
                 },
-                'camera': {'index': config['camera_index'], 'width': self.camera.read().rgb.shape[1], 'height': self.camera.read().rgb.shape[0],
+                'camera': {'index': config['camera_index'], 'name': config.get('camera_name'), 'width': self.camera.read().rgb.shape[1], 'height': self.camera.read().rgb.shape[0],
                            'capture_width': config['width'], 'capture_height': config['height'],
                            'rotation_clockwise': self.camera.rotation_clockwise,
                            'requested_frames_per_second': config['camera_fps'],
@@ -194,6 +205,10 @@ class SO101Devices:
                            'backend': 'pyav_avfoundation', 'source_pixel_format': self.camera.source_pixel_format,
                            'color': 'RGB',
                            'timestamp_basis': 'host_read_complete_not_sensor_exposure'},
+                'mac_camera': ({'index': config['mac_camera_index'], 'name': config.get('mac_camera_name'), 'width': config['width'],
+                                'height': config['height'], 'rotation_clockwise': 0,
+                                'requested_frames_per_second': config['camera_fps'],
+                                'timestamp_basis': 'host_read_complete_not_sensor_exposure'} if self.mac_camera else None),
                 'action_timestamp_basis': 'host_command_write_return_not_motor_arrival',
             }
         except Exception:
@@ -201,10 +216,14 @@ class SO101Devices:
             raise
 
     def observe(self) -> tuple[CameraFrame, list[float], float]:
+        self.mac_frame = self.mac_camera.read() if self.mac_camera else None
         frame = self.camera.read()
         observation = self.follower.get_observation()
         positions = [float(observation[f'{name}.pos']) for name in JOINT_NAMES]
         return frame, positions, time.monotonic()
+
+    def secondary_frame(self) -> CameraFrame | None:
+        return self.mac_frame
 
     def command(self) -> list[float]:
         requested = self.leader.get_action()
@@ -219,11 +238,12 @@ class SO101Devices:
                     arm.disconnect()
             except Exception as error:
                 errors.append(str(error))
-        try:
-            if self.camera is not None:
-                self.camera.disconnect()
-        except Exception as error:
-            errors.append(str(error))
+        for camera in (self.camera, self.mac_camera):
+            try:
+                if camera is not None:
+                    camera.disconnect()
+            except Exception as error:
+                errors.append(str(error))
         if errors:
             raise RuntimeError('Device cleanup failed: ' + '; '.join(errors))
 
@@ -246,6 +266,9 @@ class DemoDevices:
         timestamp = time.monotonic()
         return CameraFrame(rgb, self.sequence, timestamp), self.positions.copy(), timestamp
 
+    def secondary_frame(self) -> CameraFrame | None:
+        return None
+
     def command(self) -> list[float]:
         self.positions[0] = float(20 * np.sin(self.sequence / 20))
         return self.positions.copy()
@@ -254,7 +277,7 @@ class DemoDevices:
         pass
 
 
-def inspect_camera(index: int) -> dict[str, Any]:
+def inspect_camera(index: int | str) -> dict[str, Any]:
     """Probe native frame geometry at 30 images per second, not every supported mode."""
     with open_camera(index, fps=30) as capture:
         frame = next(camera_frames(capture, Event()))

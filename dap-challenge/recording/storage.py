@@ -16,6 +16,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from training.shared.devices import CameraFrame
 from models.dimensions import A
 from training.shared.normalization import JOINT_NAMES
 
@@ -72,7 +73,7 @@ class EpisodeStore:
             try:
                 metadata = json.loads(path.read_text())
                 episodes.append({key: metadata.get(key) for key in (
-                    'episode_id', 'status', 'created_at', 'row_count', 'error', 'diagnostics',
+                    'episode_id', 'status', 'created_at', 'row_count', 'error', 'diagnostics', 'name', 'notes', 'mac_camera',
                 )})
             except (OSError, ValueError):
                 continue
@@ -94,7 +95,7 @@ class EpisodeStore:
             pq.write_table(pa.Table.from_pylist(rows), path / 'steps.parquet')
         return len(rows)
 
-    def keep(self, episode_id: str) -> Path:
+    def keep(self, episode_id: str, name: str = '', notes: str = '') -> Path:
         path = self.path(episode_id)
         metadata = self.metadata(episode_id)
         if metadata['status'] != 'review' or metadata.get('row_count', 0) < 1:
@@ -102,11 +103,14 @@ class EpisodeStore:
         if not (path / 'video.mp4').is_file() or not (path / 'steps.parquet').is_file():
             raise ValueError('take is missing video or robot data')
 
+        if metadata.get('mac_camera') and not (path / 'mac_video.mp4').is_file():
+            raise ValueError('take is missing the Mac camera video')
+
         destination = self.root / episode_id
         if destination.exists():
             raise ValueError('episode already exists in training data')
 
-        metadata['status'] = 'accepted'
+        metadata.update(status='accepted', name=name.strip(), notes=notes.strip())
         write_metadata(path, metadata)
         try:
             path.rename(destination)
@@ -118,6 +122,51 @@ class EpisodeStore:
 
     def discard(self, episode_id: str) -> None:
         shutil.rmtree(self.path(episode_id))
+
+
+class CameraVideo:
+    """Encode a timestamped secondary camera stream on the episode clock."""
+
+    def __init__(self, path: Path, fps: int, started: float):
+        self.path, self.fps, self.started = path, fps, started
+        self.container = None
+        self.stream = None
+        self.sequence = None
+        self.frame_index = -1
+        self.timestamp = None
+        self.origin = None
+
+    def append(self, camera: CameraFrame) -> None:
+        if self.timestamp is not None and (camera.timestamp < self.timestamp or camera.sequence < self.sequence):
+            raise ValueError('Mac camera timestamps or sequence went backward')
+        if camera.sequence == self.sequence:
+            return
+
+        if self.container is None:
+            self.container = av.open(str(self.path), 'w', options={'movflags': 'frag_every_frame+empty_moov+default_base_moof'})
+            self.stream = self.container.add_stream('libx264', rate=self.fps)
+            self.stream.width, self.stream.height = camera.rgb.shape[1], camera.rgb.shape[0]
+            self.stream.pix_fmt = 'yuv420p'
+            self.stream.time_base = self.stream.codec_context.time_base = Fraction(1, 1_000_000)
+            self.stream.options = {'crf': '18', 'bf': '0', 'g': str(self.fps), 'tune': 'zerolatency'}
+            self.origin = camera.timestamp
+        frame = av.VideoFrame.from_ndarray(camera.rgb, format='rgb24')
+        frame.time_base = Fraction(1, 1_000_000)
+        frame.pts = round((camera.timestamp - self.origin) * 1_000_000)
+        for packet in self.stream.encode(frame):
+            self.container.mux(packet)
+        self.frame_index += 1
+        self.sequence, self.timestamp = camera.sequence, camera.timestamp
+
+    def close(self) -> None:
+        if self.container is None:
+            raise ValueError('Mac camera supplied no recorded frames')
+
+        try:
+            for packet in self.stream.encode():
+                self.container.mux(packet)
+        finally:
+            self.container.close()
 
 
 class EpisodeWriter:
@@ -146,6 +195,7 @@ class EpisodeWriter:
         self.rows: list[dict[str, Any]] = []
         self.container = None
         self.stream = None
+        self.mac_video = CameraVideo(self.path / 'mac_video.mp4', fps, self.started) if device_metadata.get('mac_camera') else None
         self.last_sequence = None
         self.frame_index = -1
         self.frame_time = 0.0
@@ -158,10 +208,14 @@ class EpisodeWriter:
     def append(
         self, rgb: UInt8[np.ndarray, 'H_src W_src C_in'], sequence: int,
         camera_time: float, observation_time: float, action_time: float,
-        positions: list[float], actions: list[float],
+        positions: list[float], actions: list[float], mac_frame: CameraFrame | None = None,
     ) -> None:
-        if camera_time < self.started:
+        if self.mac_video is not None and mac_frame is None:
+            raise ValueError('Mac camera frame is required for a two-camera episode')
+        if camera_time < self.started or (mac_frame is not None and mac_frame.timestamp < self.started):
             return
+        if mac_frame is not None and mac_frame.timestamp > observation_time:
+            raise ValueError('Mac camera frame must precede its observation')
         if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
             raise ValueError('camera must produce RGB uint8 [H_src,W_src,C_in]')
         if len(positions) != A or len(actions) != A or not np.isfinite(positions + actions).all():
@@ -202,6 +256,12 @@ class EpisodeWriter:
             'action_timestamp_s': action_time - self.started,
             'positions': positions, 'actions': actions,
         }
+        if self.mac_video is not None:
+            self.mac_video.append(mac_frame)
+            row.update(mac_frame_index=self.mac_video.frame_index,
+                       mac_camera_timestamp_s=self.mac_video.timestamp - self.started)
+            self.metadata['mac_camera']['first_frame_timestamp_s'] = self.mac_video.origin - self.started
+            self.metadata['mac_camera']['video_file'] = 'mac_video.mp4'
         self.journal.write(json.dumps(row, allow_nan=False) + '\n')
         self.journal.flush()
         os.fsync(self.journal.fileno())
@@ -229,6 +289,11 @@ class EpisodeWriter:
         except Exception as failure:
             error = '; '.join(part for part in (error, str(failure)) if part)
         finally:
+            if self.mac_video is not None:
+                try:
+                    self.mac_video.close()
+                except Exception as failure:
+                    error = '; '.join(part for part in (error, str(failure)) if part)
             self.journal.close()
             self.timing.close()
             self.metadata.update(

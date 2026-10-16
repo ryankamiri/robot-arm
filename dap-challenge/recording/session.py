@@ -107,7 +107,10 @@ class RecorderSession:
             if self.writer is not None or self.finalization is not None:
                 raise ValueError('wait for recording finalization before reviewing a take')
 
-            getattr(self.store, command)(payload['episode_id'])
+            if command == 'keep':
+                self.store.keep(payload['episode_id'], payload.get('name', ''), payload.get('notes', ''))
+            else:
+                self.store.discard(payload['episode_id'])
             self._update(phase='reset' if self.devices is not None else 'disconnected', active_episode_id=None)
         elif command == 'ready':
             if self.devices is None or self.state['phase'] != 'reset':
@@ -176,7 +179,8 @@ class RecorderSession:
         sent = self.devices.command()
         commanded = time.monotonic()
         if self.writer is not None:
-            self.writer.append(frame.rgb, frame.sequence, frame.timestamp, observed, commanded, positions, sent)
+            self.writer.append(frame.rgb, frame.sequence, frame.timestamp, observed, commanded, positions, sent,
+                               self.devices.secondary_frame())
         finished = time.monotonic()
         duration = finished - scheduled
         age = observed - frame.timestamp

@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 from serial.tools.list_ports import comports
 import uvicorn
 
-from training.shared.discovery import device_inventory, load_profile, remember_profile, resolve_profile, resolve_connection
+from training.shared.discovery import camera_source, device_inventory, load_profile, remember_profile, resolve_profile, resolve_connection
 from recording.session import RecorderSession
 from training.shared.devices import DemoDevices, SO101Devices
 from training.shared.config import load_config
@@ -35,6 +35,8 @@ class ConnectionSettings(BaseModel):
     leader_serial: str | None = None
     follower_serial: str | None = None
     camera_device_id: str | None = None
+    mac_camera_index: Annotated[int, Field(ge=0)] | None = None
+    mac_camera_device_id: str | None = None
 
     @model_validator(mode='after')
     def validate_dimensions(self):
@@ -50,6 +52,11 @@ class CameraSettings(BaseModel):
 
 class EpisodeSelection(BaseModel):
     episode_id: str
+
+
+class EpisodeKeep(EpisodeSelection):
+    name: str = ''
+    notes: str = ''
 
 
 def create_app(session: RecorderSession | None = None, demo: bool = False, profile_path: Path | None = None) -> FastAPI:
@@ -111,7 +118,12 @@ def create_app(session: RecorderSession | None = None, demo: bool = False, profi
 
     @app.post('/api/camera/inspect')
     def camera(settings: CameraSettings):
-        return execute('inspect_camera', settings.model_dump())
+        try:
+            source = camera_source(settings.camera_index, device_inventory())
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
+        return execute('inspect_camera', {'camera_index': source})
 
     @app.post('/api/connect')
     def connect(settings: ConnectionSettings):
@@ -130,7 +142,7 @@ def create_app(session: RecorderSession | None = None, demo: bool = False, profi
                 raise HTTPException(409, str(error)) from error
 
         hardware_settings = {key: value for key, value in values.items()
-                             if key not in ('leader_serial', 'follower_serial', 'camera_device_id')}
+                             if key not in ('leader_serial', 'follower_serial', 'camera_device_id', 'mac_camera_device_id')}
         return execute('connect', hardware_settings)
 
     @app.post('/api/recording/start')
@@ -150,7 +162,7 @@ def create_app(session: RecorderSession | None = None, demo: bool = False, profi
         return execute('ready')
 
     @app.post('/api/episodes/keep')
-    def keep(selection: EpisodeSelection):
+    def keep(selection: EpisodeKeep):
         return execute('keep', selection.model_dump())
 
     @app.post('/api/episodes/discard')
@@ -158,13 +170,13 @@ def create_app(session: RecorderSession | None = None, demo: bool = False, profi
         return execute('discard', selection.model_dump())
 
     @app.get('/api/episodes/{episode_id}/video')
-    def video(episode_id: str):
+    def video(episode_id: str, camera: Literal['arm', 'mac'] = 'arm'):
         try:
             metadata = session.store.metadata(episode_id)
             if metadata['status'] == 'recording':
                 raise HTTPException(409, 'Stop recording before previewing the video.')
 
-            path = session.store.path(episode_id) / 'video.mp4'
+            path = session.store.path(episode_id) / ('mac_video.mp4' if camera == 'mac' else 'video.mp4')
             if not path.is_file():
                 raise HTTPException(404, 'This incomplete take has no playable video.')
 
