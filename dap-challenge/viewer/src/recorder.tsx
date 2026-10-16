@@ -34,11 +34,17 @@ export function Recorder() {
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState('');
   const [videoError, setVideoError] = useState(false);
-  const [ports, setPorts] = useState<{ port: string; description: string }[]>([]);
+  const [ports, setPorts] = useState<{ port: string; description: string; serial?: string | null }[]>([]);
+  const [cameras, setCameras] = useState<{ index: number; name: string; device_id: string }[]>([]);
+  const [deviceWarnings, setDeviceWarnings] = useState<string[]>([]);
+  const [discovering, setDiscovering] = useState(false);
   const [profile, setProfile] = useState('');
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const [rotation, setRotation] = useState(0);
+  const [videoSize, setVideoSize] = useState({ width: 4, height: 3 });
   const [form, setForm] = useState({
     leader_port: '', follower_port: '', leader_id: '', follower_id: '',
-    calibration_dir: '', camera_index: '0', width: '', height: '', camera_fps: '30',
+    calibration_dir: '', camera_index: '', width: '640', height: '480', camera_fps: '30',
   });
 
   useEffect(() => {
@@ -49,7 +55,7 @@ export function Recorder() {
         const next = await api('status');
         if (active) setStatus(next);
       } catch (failure) {
-        if (active) setError(String(failure));
+        if (active) { setError(String(failure)); setCountdown(null); }
       } finally {
         if (active) timer = setTimeout(poll, 500);
       }
@@ -57,6 +63,31 @@ export function Recorder() {
     void poll();
     return () => { active = false; clearTimeout(timer); };
   }, []);
+
+  async function discover() {
+    setDiscovering(true);
+    try {
+      const devices = await api('devices');
+      setPorts(devices.ports);
+      setCameras(devices.cameras);
+      setDeviceWarnings(devices.warnings);
+      setForm(previous => {
+        const next = { ...previous };
+        for (const key of Object.keys(next) as (keyof typeof next)[]) {
+          if (key in devices.settings) next[key] = String(devices.settings[key] ?? '');
+        }
+        return next;
+      });
+    } catch (failure) {
+      setDeviceWarnings([String(failure)]);
+    } finally {
+      setDiscovering(false);
+    }
+  }
+
+  useEffect(() => {
+    if (status && !status.connected && !status.demo) void discover();
+  }, [status?.connected, status?.demo]);
 
   const takeId = selected || status?.active_episode_id || '';
   const take = status?.pending.find(entry => entry.episode_id === takeId);
@@ -76,10 +107,35 @@ export function Recorder() {
     }
   }
 
+  useEffect(() => {
+    if (countdown === null) return;
+    if (!status?.connected || status.phase !== 'ready') {
+      setCountdown(null);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      if (countdown > 1) setCountdown(countdown - 1);
+      else {
+        setCountdown(null);
+        setSelected('');
+        void action('recording/start');
+      }
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [countdown, status?.connected, status?.phase]);
+
+  const radians = rotation * Math.PI / 180;
+  const rotatedWidth = Math.abs(videoSize.width * Math.cos(radians)) + Math.abs(videoSize.height * Math.sin(radians));
+  const rotatedHeight = Math.abs(videoSize.width * Math.sin(radians)) + Math.abs(videoSize.height * Math.cos(radians));
+
   async function connect(event: FormEvent) {
     event.preventDefault();
     await action('connect', {
       ...form, calibration_dir: form.calibration_dir || null,
+      leader_serial: ports.find(port => port.port === form.leader_port)?.serial ?? null,
+      follower_serial: ports.find(port => port.port === form.follower_port)?.serial ?? null,
+      camera_device_id: cameras.find(camera => camera.index === Number(form.camera_index))?.device_id ?? null,
       camera_index: Number(form.camera_index),
       width: Number(form.width || (status?.demo ? 320 : 0)),
       height: Number(form.height || (status?.demo ? 240 : 0)), camera_fps: Number(form.camera_fps),
@@ -106,11 +162,11 @@ export function Recorder() {
     {(error || status?.error) && <p role="alert">{error || status?.error}</p>}
 
     {!status?.connected && <form onSubmit={connect}>
-      <fieldset disabled={busy || !status}>
+      <fieldset disabled={busy || discovering || !status}>
         <legend>Connect session</legend>
-        <button type="button" onClick={() => {
-          void api('ports').then(setPorts).catch(failure => setError(String(failure)));
-        }}>List USB ports</button>
+        <button type="button" onClick={() => void discover()}>{discovering ? 'Finding devices…' : 'Rediscover saved setup'}</button>
+        <p>Devices are detected automatically. Connect starts teleoperation.</p>
+        {deviceWarnings.map((warning, index) => <p role="status" key={index}>{warning}</p>)}
         {ports.map(port => <p key={port.port}>{port.port} · {port.description}</p>)}
         <datalist id="ports">{ports.map(port => <option key={port.port} value={port.port} />)}</datalist>
         {(['leader_port', 'follower_port', 'leader_id', 'follower_id', 'calibration_dir'] as const).map(key =>
@@ -121,9 +177,16 @@ export function Recorder() {
           </label>,
         )}
         <p>Use the IDs you calibrated with LeRobot. Existing calibration is required.</p>
-        {(['camera_index', 'width', 'height', 'camera_fps'] as const).map(key =>
+        <label>Camera
+          <select aria-label="Camera" required={!status?.demo} value={form.camera_index}
+            onChange={event => setForm({ ...form, camera_index: event.target.value })}>
+            <option value="">Select a camera</option>
+            {cameras.map(camera => <option key={camera.device_id} value={camera.index}>{camera.name} · index {camera.index}</option>)}
+          </select>
+        </label>
+        {(['width', 'height', 'camera_fps'] as const).map(key =>
           <label key={key}>{key === 'camera_fps' ? 'Camera images per second' : key.replaceAll('_', ' ')}
-            <input type="number" value={form[key]} min={key === 'camera_index' ? 0 : 1}
+            <input type="number" value={form[key]} min={1}
               required={!status?.demo} onChange={event => setForm({ ...form, [key]: event.target.value })} />
           </label>,
         )}
@@ -137,12 +200,14 @@ export function Recorder() {
     {status?.connected && <section>
       <p>Follower follows the leader during recording, review, and reset.</p>
       <div className="actions">
-        <button disabled={busy || status.phase !== 'ready'} onClick={() => {
-          setSelected(''); void action('recording/start');
+        <button disabled={busy || countdown !== null || status.phase !== 'ready'} onClick={() => {
+          setError(''); setCountdown(3);
         }}>Start recording</button>
+        {countdown !== null && <button onClick={() => setCountdown(null)}>Cancel countdown</button>}
         <button disabled={busy || status.phase !== 'recording'} onClick={() => void action('recording/stop')}>Stop recording</button>
-        <button disabled={busy} onClick={() => void action('disconnect')}>End session / release motors</button>
+        <button disabled={busy} onClick={() => { setCountdown(null); void action('disconnect'); }}>End session / release motors</button>
       </div>
+      {countdown !== null && <p className="countdown" role="status" aria-live="assertive">Recording starts in {countdown}…</p>}
       <p>Support the follower before ending the session: motor torque will be released.</p>
       <p>Recording target: 30 iterations per second. Rows in latest take: {status.recorded_rows}.</p>
       <p>Session missed deadlines: {status.diagnostics.missed_deadlines} · Slowest cycle: {(status.diagnostics.max_cycle_s * 1000).toFixed(1)} ms · Latest frame age: {(status.diagnostics.camera_age_s * 1000).toFixed(1)} ms</p>
@@ -159,8 +224,18 @@ export function Recorder() {
       {take && take.status !== 'recording' && <>
         <p>{take.status} · {take.row_count ?? 0} observations</p>
         {take.error && <p role="alert">{take.error}</p>}
-        <video key={takeId} controls preload="metadata" src={`/api/episodes/${encodeURIComponent(takeId)}/video`}
-          onError={() => setVideoError(true)} />
+        <label>Preview rotation: {rotation}°
+          <input aria-label="Preview rotation" type="range" min="-180" max="180" step="1"
+            value={rotation} onChange={event => setRotation(Number(event.target.value))} />
+          <button onClick={() => setRotation(0)}>Reset rotation</button>
+        </label>
+        <p>Rotation changes this preview only. Saved videos and training images are unchanged.</p>
+        <div className="review-video" style={{ aspectRatio: `${rotatedWidth} / ${rotatedHeight}` }}>
+          <video key={takeId} controls preload="metadata" src={`/api/episodes/${encodeURIComponent(takeId)}/video`}
+            style={{ width: `${100 * videoSize.width / rotatedWidth}%`, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }}
+            onLoadedMetadata={event => setVideoSize({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight })}
+            onError={() => setVideoError(true)} />
+        </div>
         {videoError && <p role="alert">Video could not be played. The pending files remain preserved.</p>}
         <p>Take missed deadlines: {take.diagnostics?.missed_deadlines ?? 'unavailable'} · Repeated camera frames: {take.diagnostics?.repeated_frames ?? 'unavailable'}</p>
         <div className="actions">

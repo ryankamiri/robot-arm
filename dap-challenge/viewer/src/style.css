@@ -9,3 +9,7 @@ button, input, select { font: inherit; padding: 6px 10px; }
 video { display: block; width: 100%; max-height: 480px; margin: 16px 0; background: #111; }
 pre { white-space: pre-wrap; }
 [role="alert"] { color: #c33; }
+
+.countdown { font-size: 2rem; font-weight: bold; }
+.review-video { position: relative; width: 100%; margin: 16px 0; background: #111; overflow: hidden; }
+.review-video video { position: absolute; left: 50%; top: 50%; max-height: none; margin: 0; }

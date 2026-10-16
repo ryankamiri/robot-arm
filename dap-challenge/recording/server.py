@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 from serial.tools.list_ports import comports
 import uvicorn
 
+from training.shared.discovery import device_inventory, load_profile, remember_profile, resolve_profile, resolve_connection
 from recording.session import RecorderSession
 from training.shared.devices import DemoDevices, SO101Devices
 from training.shared.config import load_config
@@ -30,6 +31,9 @@ class ConnectionSettings(BaseModel):
     width: Annotated[int, Field(gt=0)]
     height: Annotated[int, Field(gt=0)]
     camera_fps: Annotated[int, Field(gt=0)] = 30
+    leader_serial: str | None = None
+    follower_serial: str | None = None
+    camera_device_id: str | None = None
 
     @model_validator(mode='after')
     def validate_dimensions(self):
@@ -47,7 +51,10 @@ class EpisodeSelection(BaseModel):
     episode_id: str
 
 
-def create_app(session: RecorderSession | None = None, demo: bool = False) -> FastAPI:
+def create_app(session: RecorderSession | None = None, demo: bool = False, profile_path: Path | None = None) -> FastAPI:
+    if profile_path is None:
+        profile_path = PROJECT / 'local' / 'connection.json'
+
     config = load_config(PROJECT / 'configs' / 'bc.yaml')
     root = PROJECT.parent / config['dataset']['root']
     if demo:
@@ -91,6 +98,16 @@ def create_app(session: RecorderSession | None = None, demo: bool = False) -> Fa
     def ports():
         return [{'port': port.device, 'description': port.description} for port in comports()]
 
+    @app.get('/api/devices')
+    def devices():
+        inventory = device_inventory() if not demo else {'ports': [], 'cameras': [], 'warnings': []}
+        try:
+            settings, warnings = resolve_profile(load_profile(profile_path), inventory)
+        except (OSError, ValueError) as error:
+            raise HTTPException(503, f'Cannot read saved connection: {error}') from error
+
+        return {**inventory, 'settings': settings, 'warnings': warnings}
+
     @app.post('/api/camera/inspect')
     def camera(settings: CameraSettings):
         return execute('inspect_camera', settings.model_dump())
@@ -102,7 +119,18 @@ def create_app(session: RecorderSession | None = None, demo: bool = False) -> Fa
                          or settings.leader_port == settings.follower_port):
             raise HTTPException(422, 'Provide distinct arm ports and both calibrated arm IDs.')
 
-        return execute('connect', settings.model_dump())
+        values = settings.model_dump()
+        if not demo:
+            inventory = device_inventory()
+            try:
+                values = resolve_connection(values, inventory)
+                remember_profile(profile_path, values, inventory)
+            except (OSError, ValueError) as error:
+                raise HTTPException(409, str(error)) from error
+
+        hardware_settings = {key: value for key, value in values.items()
+                             if key not in ('leader_serial', 'follower_serial', 'camera_device_id')}
+        return execute('connect', hardware_settings)
 
     @app.post('/api/recording/start')
     def start():
