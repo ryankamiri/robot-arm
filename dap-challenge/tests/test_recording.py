@@ -47,7 +47,8 @@ class ControlledDevices(DemoDevices):
 class DualCameraDevices(ControlledDevices):
     def connect(self):
         metadata = super().connect()
-        metadata['mac_camera'] = {'width': 320, 'height': 240, 'timestamp_basis': 'synthetic_host_monotonic'}
+        metadata['camera']['rotation_clockwise'] = 0
+        metadata['mac_camera'] = {'rotation_clockwise': 0, 'width': 320, 'height': 240, 'timestamp_basis': 'synthetic_host_monotonic'}
         return metadata
 
     def observe(self):
@@ -138,6 +139,7 @@ class RecordingTests(unittest.TestCase):
         self.assertEqual(discover_episodes(self.root), [accepted])
 
     def test_keep_roundtrip_stores_sent_controller_targets_and_normalizes_on_load(self):
+        self.device = DualCameraDevices()
         self.connect()
         episode_id = self.record()
         pending = self.session.store.path(episode_id)

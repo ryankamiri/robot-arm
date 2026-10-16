@@ -6,7 +6,7 @@ import torch
 from jaxtyping import Float
 from torch import Tensor, nn
 
-from .dimensions import A, C_RGB, D_FUSION, D_IMG, D_OBS, D_POS
+from .dimensions import A, C_RGB, I_INPUTS, D_FUSION, D_IMG, D_OBS, D_POS
 
 
 class ResidualBlock(nn.Module):
@@ -94,20 +94,20 @@ class DapActorNetwork(nn.Module):
 
     def forward(
         self,
-        images: Float[Tensor, "B L C_in H_in W_in"],
+        images: Float[Tensor, "B L I C_in H_in W_in"],
         positions: Float[Tensor, "B L A"],
     ) -> GaussianParameters:
-        """Map images [B,L,C_in,H_in,W_in] and positions [B,L,A] to two [B,A] tensors."""
-        if images.ndim != 5:
-            raise ValueError("images must have shape [B, L, C_in, H_in, W_in]")
+        """Map images [B,L,I,C_in,H_in,W_in] and positions [B,L,A] to two [B,A] tensors."""
+        if images.ndim != 6:
+            raise ValueError("images must have shape [B, L, I, C_in, H_in, W_in]")
 
-        B, L, C_in, H_in, W_in = images.shape
+        B, L, I, C_in, H_in, W_in = images.shape
         if B < 1 or H_in < 1 or W_in < 1:
             raise ValueError("image batch and spatial dimensions must be positive")
-        if L != self.history_length or C_in != C_RGB:
+        if L != self.history_length or I != I_INPUTS or C_in != C_RGB:
             raise ValueError(
-                f"expected L={self.history_length}, C_in={C_RGB}; "
-                f"got L={L}, C_in={C_in}"
+                f"expected L={self.history_length}, I={I_INPUTS}, C_in={C_RGB}; "
+                f"got L={L}, I={I}, C_in={C_in}"
             )
         if positions.shape != (B, L, A):
             raise ValueError(f"positions must match images with shape [B, L, A], A={A}")
@@ -116,18 +116,19 @@ class DapActorNetwork(nn.Module):
         if images.device != positions.device or images.dtype != positions.dtype:
             raise ValueError("images and positions must share a device and dtype")
 
-        # Folding time into the batch applies the SAME encoder to every frame.
-        N = B * L
+        # Fold history and camera inputs into one batch for the shared encoder.
+        N = B * L * I
         encoded_images: Float[Tensor, "N D_IMG"] = self.image_encoder(
             images.reshape(N, C_in, H_in, W_in)
         )
         if encoded_images.shape != (N, D_IMG):
             raise ValueError(
-                f"image_encoder must return [N, D_IMG], N=B*L and D_IMG={D_IMG}"
+                f"image_encoder must return [N, D_IMG], N=B*L*I and D_IMG={D_IMG}"
             )
 
-        image_features: Float[Tensor, "B L D_IMG"] = encoded_images.reshape(
-            B, L, D_IMG
+        D_images = I * D_IMG
+        image_features: Float[Tensor, "B L D_images"] = encoded_images.reshape(
+            B, L, D_images
         )
         position_features: Float[Tensor, "B L D_POS"] = self.position_encoder(
             positions

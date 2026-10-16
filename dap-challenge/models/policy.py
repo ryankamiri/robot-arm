@@ -1,6 +1,7 @@
 """Hugging Face-compatible actor interface, separate from robot execution."""
 
 import math
+from typing import Mapping
 
 from huggingface_hub import PyTorchModelHubMixin
 from jaxtyping import Float
@@ -37,9 +38,17 @@ class DapPolicy(
         self.log_std_max = log_std_max
         self.network = DapActorNetwork(ImageEncoder(), history_length=history_length)
 
+    def load_state_dict(self, state_dict: Mapping[str, Tensor], strict: bool = True, assign: bool = False):
+        weight = state_dict.get('network.fusion.0.weight')
+        expected = self.network.fusion[0].weight.shape
+        if weight is not None and weight.shape != expected:
+            raise RuntimeError('Checkpoint fusion shape is incompatible with this two-camera policy; single-camera checkpoints cannot be loaded unchanged.')
+
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
+
     def forward(
         self,
-        images: Float[Tensor, "B L C_in H_in W_in"],
+        images: Float[Tensor, "B L I C_in H_in W_in"],
         positions: Float[Tensor, "B L A"],
     ) -> GaussianParameters:
         """Return pre-tanh mean and bounded log_std, both [B,A], without sampling."""
@@ -51,7 +60,7 @@ class DapPolicy(
 
     def sample(
         self,
-        images: Float[Tensor, "B L C_in H_in W_in"],
+        images: Float[Tensor, "B L I C_in H_in W_in"],
         positions: Float[Tensor, "B L A"],
     ) -> ActionSample:
         """Return sampled normalized actions [B,A] and joint log_prob [B]."""
@@ -59,7 +68,7 @@ class DapPolicy(
 
     def deterministic_action(
         self,
-        images: Float[Tensor, "B L C_in H_in W_in"],
+        images: Float[Tensor, "B L I C_in H_in W_in"],
         positions: Float[Tensor, "B L A"],
     ) -> Float[Tensor, "B A"]:
         """Return tanh(mean) [B,A], not the exact mean of the transformed law."""

@@ -3,6 +3,7 @@
 import copy
 import json
 import math
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
@@ -53,10 +54,12 @@ class BCTrainingTests(unittest.TestCase):
                         container.mux(packet)
                 for packet in stream.encode():
                     container.mux(packet)
+            shutil.copy2(path / 'video.mp4', path / 'mac_video.mp4')
             actions = denormalize_controller(torch.tensor([[-1.] * A, [0.] * A, [1.] * A]), JOINT_NAMES)
             positions = denormalize_controller(torch.zeros(3, A), JOINT_NAMES)
             pq.write_table(pa.table({
                 'time_index': [0, 1, 2], 'frame_index': [0, 1, 2],
+                'mac_frame_index': [0, 1, 2], 'mac_camera_timestamp_s': [0., 0.03, 0.06],
                 'camera_timestamp_s': [0., 0.03, 0.06], 'timestamp_s': [0.001, 0.031, 0.061],
                 'action_timestamp_s': [0.002, 0.032, 0.062],
                 'positions': positions.tolist(), 'actions': actions.tolist(),
@@ -65,6 +68,7 @@ class BCTrainingTests(unittest.TestCase):
                 'schema_version': 2, 'episode_id': path.name, 'joint_names': list(JOINT_NAMES),
                 'normalized': False, 'controller_convention': 'lerobot_range',
                 'calibration': {'source': 'synthetic test'}, 'status': 'accepted',
+                'camera': {'rotation_clockwise': 0}, 'mac_camera': {'rotation_clockwise': 0},
             }))
 
     def test_nll_matches_pytorch_transformed_distribution_and_has_gradients(self):

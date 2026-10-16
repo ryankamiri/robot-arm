@@ -1,6 +1,7 @@
 """Synthetic real-file checks for alignment, causal windows and BC batches."""
 
 import json
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
@@ -46,11 +47,14 @@ class BCDatasetTests(unittest.TestCase):
                     container.mux(packet)
             for packet in stream.encode():
                 container.mux(packet)
+        shutil.copy2(path / 'video.mp4', path / 'mac_video.mp4')
         if frame_indices is None:
             frame_indices = list(range(T))
         table = {
             "time_index": list(range(T)),
             "frame_index": frame_indices,
+            "mac_frame_index": list(range(T)),
+            "mac_camera_timestamp_s": [index / 10 for index in range(T)],
             "timestamp_s": [index / 10 + 0.01 for index in range(T)],
             "camera_timestamp_s": [index / 10 for index in frame_indices],
             "action_timestamp_s": [index / 10 + 0.02 for index in range(T)],
@@ -68,6 +72,8 @@ class BCDatasetTests(unittest.TestCase):
             "controller_convention": "lerobot_range",
             "calibration": {"source": "synthetic test fixture"},
             "status": "accepted",
+            "camera": {"rotation_clockwise": 0},
+            "mac_camera": {"rotation_clockwise": 0},
         }))
         return path
 
@@ -89,14 +95,44 @@ class BCDatasetTests(unittest.TestCase):
         torch.testing.assert_close(image[0], torch.ones(H_in, W_in))
         torch.testing.assert_close(image[1:], torch.zeros(C_RGB - 1, H_in, W_in))
 
+    def test_preprocessing_undoes_saved_clockwise_rotation_before_resize(self):
+        original = torch.arange(6 * 8 * C_RGB, dtype=torch.uint8).reshape(6, 8, C_RGB)
+        recorded = torch.rot90(original, k=-1, dims=(0, 1))
+        torch.testing.assert_close(preprocess_image(recorded, 8, 6, 90), preprocess_image(original, 8, 6))
+        torch.testing.assert_close(preprocess_image(original, 8, 6, 0), preprocess_image(original, 8, 6))
+
+    def test_requires_both_videos_and_explicit_rotation(self):
+        path = self.write_episode('missing_mac')
+        (path / 'mac_video.mp4').unlink()
+        with self.assertRaisesRegex(ValueError, 'missing required camera video'):
+            load_episode(path, 8, 6)
+        path = self.write_episode('missing_rotation')
+        metadata = json.loads((path / 'metadata.json').read_text())
+        del metadata['camera']['rotation_clockwise']
+        (path / 'metadata.json').write_text(json.dumps(metadata))
+        with self.assertRaisesRegex(ValueError, 'rotation_clockwise'):
+            load_episode(path, 8, 6)
+
+    def test_rejects_invalid_secondary_indices_and_capture_times(self):
+        mutations = (
+            {'mac_frame_index': [0, 1, 2, 99]},
+            {'mac_camera_timestamp_s': [0., 0.1, 0.2, 0.9]},
+            {'mac_frame_index': [0, 0, 2, 3], 'mac_camera_timestamp_s': [0., 0.1, 0.2, 0.3]},
+        )
+        for index, mutation in enumerate(mutations):
+            path = self.write_episode(f'bad_mac_{index}')
+            self.rewrite_columns(path, **mutation)
+            with self.assertRaises(ValueError):
+                load_episode(path, 8, 6)
+
     def test_loads_real_video_and_hf_table_without_modifying_endpoint_labels(self):
         path = self.write_episode("episode_0")
         H_in, W_in = 6, 8
         episode = load_episode(path, W_in, H_in)
         self.assertIsInstance(episode.table, HFDataset)
-        self.assertEqual(episode.frames.shape, (len(episode), C_RGB, H_in, W_in))
-        self.assertTrue((episode.frames >= 0).all())
-        self.assertTrue((episode.frames <= 1).all())
+        self.assertEqual(episode.frames[0].shape, (len(episode), C_RGB, H_in, W_in))
+        self.assertTrue(all((view >= 0).all() for view in episode.frames))
+        self.assertTrue(all((view <= 1).all() for view in episode.frames))
         self.assertTrue((episode.actions[0] == -1).all())
         self.assertTrue((episode.actions[-1] == 1).all())
 
@@ -106,7 +142,7 @@ class BCDatasetTests(unittest.TestCase):
         dataset = BCDataset([episode], L)
         for time_index, indices in enumerate(([0, 0, 0], [0, 0, 1], [0, 1, 2], [1, 2, 3])):
             sample = dataset[time_index]
-            torch.testing.assert_close(sample["images"], episode.frames[indices])
+            torch.testing.assert_close(sample["images"], torch.stack([view[indices] for view in episode.frames], dim=1))
             torch.testing.assert_close(sample["positions"], episode.positions[indices])
             torch.testing.assert_close(sample["expert_action"], episode.actions[time_index])
 
@@ -118,13 +154,13 @@ class BCDatasetTests(unittest.TestCase):
         self.assertEqual(sample["episode_id"], second.episode_id)
         self.assertEqual(sample["time_index"], 0)
         torch.testing.assert_close(sample["positions"], second.positions[[0, 0, 0]])
-        torch.testing.assert_close(sample["images"], second.frames[[0, 0, 0]])
+        torch.testing.assert_close(sample["images"], torch.stack([view[[0, 0, 0]] for view in second.frames], dim=1))
 
     def test_repeated_and_skipped_video_frames_use_explicit_indices(self):
         path = self.write_episode("episode_0", T=3, frame_indices=[0, 0, 2])
         episode = load_episode(path, 8, 6)
         sample = BCDataset([episode], 3)[2]
-        torch.testing.assert_close(sample["images"], episode.frames[[0, 0, 2]])
+        torch.testing.assert_close(sample["images"], torch.stack((episode.frames[0][[0, 0, 2]], episode.frames[1][[0, 1, 2]]), dim=1))
         self.assertGreater(sample["images"][2].mean().item(), sample["images"][1].mean().item())
         torch.testing.assert_close(sample["positions"], episode.positions)
         torch.testing.assert_close(sample["expert_action"], episode.actions[2])
@@ -201,7 +237,7 @@ class BCDatasetTests(unittest.TestCase):
         L = config["model"]["history_length"]
         H_in = config["preprocessing"]["image_height"]
         W_in = config["preprocessing"]["image_width"]
-        self.assertEqual(batch["images"].shape, (B, L, C_RGB, H_in, W_in))
+        self.assertEqual(batch["images"].shape, (B, L, 2, C_RGB, H_in, W_in))
         self.assertEqual(batch["positions"].shape, (B, L, A))
         self.assertEqual(batch["expert_action"].shape, (B, A))
         with torch.inference_mode():

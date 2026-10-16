@@ -19,7 +19,7 @@ from training.shared.observations import build_history
 class BCSample(TypedDict):
     """One supervised example; DataLoader prepends B to the tensor shapes."""
 
-    images: Float[Tensor, "L C_in H_in W_in"]
+    images: Float[Tensor, "L I C_in H_in W_in"]
     positions: Float[Tensor, "L A"]
     expert_action: Float[Tensor, "A"]
     episode_id: str
@@ -40,7 +40,7 @@ class BCDataset(Dataset[BCSample]):
             raise ValueError("episode IDs must be unique")
         if any(episode.metadata["joint_names"] != episodes[0].metadata["joint_names"] for episode in episodes):
             raise ValueError("all episodes must use the same joint order")
-        if any(episode.frames.shape[1:] != episodes[0].frames.shape[1:] for episode in episodes):
+        if any(tuple(view.shape[1:] for view in episode.frames) != tuple(view.shape[1:] for view in episodes[0].frames) for episode in episodes):
             raise ValueError("all episodes must use the same preprocessed image shape")
 
         self.episodes = tuple(episodes)

@@ -25,7 +25,7 @@ def batch_nll(
     policy: DapPolicy, batch: Mapping[str, Any], device: torch.device, epsilon: float,
 ) -> Float[Tensor, 'B']:
     """Move observations and expert targets to the chosen float32 training device."""
-    images: Float[Tensor, 'B L C_in H_in W_in'] = batch['images'].to(device=device, dtype=torch.float32)
+    images: Float[Tensor, 'B L I C_in H_in W_in'] = batch['images'].to(device=device, dtype=torch.float32)
     positions: Float[Tensor, 'B L A'] = batch['positions'].to(device=device, dtype=torch.float32)
     targets: Float[Tensor, 'B A'] = batch['expert_action'].to(device=device, dtype=torch.float32)
     return expert_nll(policy(images, positions), targets, epsilon)

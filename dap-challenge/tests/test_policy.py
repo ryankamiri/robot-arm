@@ -9,7 +9,7 @@ import torch
 from torch.distributions import Independent, Normal, TanhTransform, TransformedDistribution
 
 from models.architecture import GaussianParameters
-from models.dimensions import A, C_RGB
+from models.dimensions import A, C_RGB, D_IMG, D_POS
 from models.policy import DapPolicy
 from models.distributions import sample_tanh_gaussian
 
@@ -20,7 +20,7 @@ class PolicyTests(unittest.TestCase):
         self.B, self.L = 2, 2
         self.H_in, self.W_in = 24, 32
         self.model = DapPolicy(self.L)
-        self.images = torch.randn(self.B, self.L, C_RGB, self.H_in, self.W_in)
+        self.images = torch.randn(self.B, self.L, 2, C_RGB, self.H_in, self.W_in)
         self.positions = torch.rand(self.B, self.L, A) * 2 - 1
 
     def test_shapes_and_history_configuration(self):
@@ -37,9 +37,31 @@ class PolicyTests(unittest.TestCase):
         B, L, H_in, W_in = 1, 3, 17, 23
         other = DapPolicy(history_length=L)
         output = other(
-            torch.randn(B, L, C_RGB, H_in, W_in), torch.zeros(B, L, A)
+            torch.randn(B, L, 2, C_RGB, H_in, W_in), torch.zeros(B, L, A)
         )
         self.assertEqual(output.mean.shape, (B, A))
+
+    def test_shared_encoder_receives_both_views_and_gradients_reach_each(self):
+        inputs = self.images.clone().requires_grad_()
+        observed_shapes = []
+        handle = self.model.network.image_encoder.register_forward_pre_hook(
+            lambda module, args: observed_shapes.append(tuple(args[0].shape))
+        )
+        try:
+            self.model(inputs, self.positions).mean.sum().backward()
+        finally:
+            handle.remove()
+        self.assertEqual(observed_shapes, [(self.B * self.L * 2, C_RGB, self.H_in, self.W_in)])
+        for i in range(2):
+            self.assertGreater(inputs.grad[:, :, i].abs().sum().item(), 0)
+
+    def test_single_camera_checkpoints_are_explicitly_rejected(self):
+        legacy = self.model.state_dict()
+        legacy['network.fusion.0.weight'] = torch.zeros(256, self.L * (D_IMG + D_POS))
+        with self.assertRaisesRegex(RuntimeError, 'two-camera policy'):
+            self.model.load_state_dict(legacy)
+        with self.assertRaisesRegex(ValueError, 'shape'):
+            self.model(self.images[:, :, 0], self.positions)
 
     def test_sampling_is_stochastic_and_deterministic_action_is_repeatable(self):
         first = self.model.sample(self.images, self.positions).actions

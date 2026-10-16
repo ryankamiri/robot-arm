@@ -24,8 +24,8 @@ class Episode:
     episode_id: str
     metadata: dict[str, Any]
     table: Dataset
-    frames: Float[Tensor, "V C_in H_in W_in"]
-    frame_indices: Int64[Tensor, "T"]
+    frames: tuple[Float[Tensor, "F_arm C_in H_in W_in"], Float[Tensor, "F_mac C_in H_in W_in"]]
+    frame_indices: Int64[Tensor, "T I"]
     positions: Float[Tensor, "T A"]
     actions: Float[Tensor, "T A"]
 
@@ -86,7 +86,7 @@ def load_episode(
     table = Dataset(pq.read_table(directory / "steps.parquet"))
     required = {
         "time_index", "frame_index", "timestamp_s", "camera_timestamp_s",
-        "action_timestamp_s", "positions", "actions",
+        "action_timestamp_s", "positions", "actions", "mac_frame_index", "mac_camera_timestamp_s",
     }
     missing = required - set(table.column_names)
     if missing:
@@ -97,7 +97,7 @@ def load_episode(
         raise ValueError("episodes must contain at least one observation/action row")
 
     columns = table.to_dict()
-    for name in ("time_index", "frame_index"):
+    for name in ("time_index", "frame_index", "mac_frame_index"):
         if any(isinstance(value, bool) or not isinstance(value, int) for value in columns[name]):
             raise ValueError(f"{name} must contain integer indices")
     if columns["time_index"] != list(range(T)):
@@ -133,6 +133,21 @@ def load_episode(
 
         captures[index] = capture_time
 
+    mac_indices: Int64[Tensor, "T"] = torch.tensor(columns['mac_frame_index'], dtype=torch.int64)
+    mac_timestamp: Float[Tensor, "T"] = torch.tensor(columns['mac_camera_timestamp_s'], dtype=torch.float64)
+    if (mac_indices < 0).any() or (mac_indices.diff() < 0).any():
+        raise ValueError('mac_frame_index must be nonnegative and nondecreasing')
+    if (not torch.isfinite(mac_timestamp).all() or (mac_timestamp < 0).any()
+            or (mac_timestamp.diff() < 0).any() or (mac_timestamp > timestamp).any()):
+        raise ValueError('Mac camera timestamps must be finite, nonnegative, ordered and no later than observations')
+
+    captures = {}
+    for index, capture_time in zip(columns['mac_frame_index'], columns['mac_camera_timestamp_s']):
+        if index in captures and captures[index] != capture_time:
+            raise ValueError('a reused Mac frame must retain its capture timestamp')
+
+        captures[index] = capture_time
+
     positions: Float[Tensor, "T A"] = torch.tensor(columns["positions"], dtype=torch.float32)
     actions: Float[Tensor, "T A"] = torch.tensor(columns["actions"], dtype=torch.float32)
     for name, values in (("positions", positions), ("actions", actions)):
@@ -142,15 +157,41 @@ def load_episode(
     positions = normalize_controller(positions, joint_names)
     actions = normalize_controller(actions, joint_names)
 
-    decoded: list[Float[Tensor, "C_in H_in W_in"]] = [
-        preprocess_image(frame, image_width, image_height)
-        for frame in _video_frames(directory / "video.mp4")
-    ]
-    if not decoded:
-        raise ValueError("episode video contains no frames")
+    views = []
+    for name, filename, indices in (
+        ('camera', 'video.mp4', frame_indices),
+        ('mac_camera', 'mac_video.mp4', mac_indices),
+    ):
+        info = metadata.get(name)
+        if not isinstance(info, dict):
+            raise ValueError(f'{name} metadata is required for two-camera training')
 
-    frames: Float[Tensor, "V C_in H_in W_in"] = torch.stack(decoded)
-    if frame_indices.max().item() >= frames.shape[0]:
-        raise ValueError("frame_index references a nonexistent video frame")
+        rotation = info.get('rotation_clockwise')
+        if isinstance(rotation, bool) or not isinstance(rotation, int) or rotation not in (0, 90, 180, 270):
+            raise ValueError(f'{name} must declare a valid rotation_clockwise')
+        if name == 'mac_camera' and rotation != 0:
+            raise ValueError('Mac camera must declare unrotated capture')
+        if info.get('video_file', filename) != filename:
+            raise ValueError(f'{name} video_file must be {filename}')
+        if not (directory / filename).is_file():
+            raise ValueError(f'missing required camera video: {directory / filename}')
 
-    return Episode(episode_id, metadata, table, frames, frame_indices, positions, actions)
+        decoded = []
+        try:
+            for frame in _video_frames(directory / filename):
+                if ('width' in info and info['width'] != frame.shape[1]) or ('height' in info and info['height'] != frame.shape[0]):
+                    raise ValueError(f'{name} video dimensions disagree with metadata')
+
+                decoded.append(preprocess_image(frame, image_width, image_height, rotation))
+        except av.error.FFmpegError as error:
+            raise ValueError(f'cannot decode {directory / filename}: {error}') from error
+        if not decoded:
+            raise ValueError(f'{filename} contains no video frames')
+
+        frames = torch.stack(decoded)
+        if indices.max().item() >= frames.shape[0]:
+            raise ValueError(f'{name} frame index references a nonexistent video frame')
+
+        views.append(frames)
+    paired_indices: Int64[Tensor, "T I"] = torch.stack((frame_indices, mac_indices), dim=1)
+    return Episode(episode_id, metadata, table, (views[0], views[1]), paired_indices, positions, actions)
