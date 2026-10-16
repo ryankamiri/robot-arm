@@ -10,7 +10,6 @@ pyarrow
 av
 fastapi
 uvicorn
-opencv-python-headless
 pyserial
 httpx
 lerobot[feetech]==0.6.1

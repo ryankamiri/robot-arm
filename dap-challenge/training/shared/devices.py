@@ -2,12 +2,15 @@
 
 from dataclasses import asdict, dataclass
 from importlib.metadata import version
+import math
 from pathlib import Path
 from threading import Event, Lock, Thread
+import sys
 import time
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
-import cv2
+import av
+from av.container import InputContainer
 from jaxtyping import UInt8
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
@@ -30,6 +33,58 @@ class Devices(Protocol):
     def disconnect(self) -> None: ...
 
 
+def open_camera(
+    index: int, width: int | None = None, height: int | None = None, fps: int | None = None,
+) -> InputContainer:
+    """Open a macOS video device through PyAV without opening an audio device."""
+    if sys.platform != 'darwin':
+        raise RuntimeError('Camera capture currently supports macOS AVFoundation only.')
+    if index < 0:
+        raise ValueError('camera index must be nonnegative')
+    if (width is None) != (height is None):
+        raise ValueError('specify both capture width and height')
+
+    options = {'pixel_format': 'nv12'}
+    if width is not None:
+        options['video_size'] = f'{width}x{height}'
+    if fps is not None:
+        options['framerate'] = str(fps)
+    return av.open(f'{index}:none', format='avfoundation', options=options, timeout=8)
+
+
+def camera_frames(capture: InputContainer, stop: Event) -> Iterator[av.VideoFrame]:
+    """Retry temporarily empty live reads; fail on EOF or ten seconds without frames."""
+    packets = capture.demux(video=0)
+    last_frame = time.monotonic()
+    while not stop.is_set():
+        try:
+            packet = next(packets)
+            for frame in packet.decode():
+                last_frame = time.monotonic()
+                yield frame
+        except av.error.BlockingIOError:
+            if time.monotonic() - last_frame >= 10:
+                raise TimeoutError('camera supplied no frame for ten seconds')
+
+            stop.wait(0.005)
+            packets = capture.demux(video=0)
+        except StopIteration as error:
+            raise ConnectionError('camera stream ended') from error
+
+
+def reported_camera_rate(capture: InputContainer) -> float | None:
+    """Represent unavailable or non-finite device frame rates as unknown metadata."""
+    rate = capture.streams.video[0].average_rate
+    if rate is None:
+        return None
+
+    value = float(rate)
+    if not math.isfinite(value) or value <= 0:
+        return None
+
+    return value
+
+
 class CameraCapture:
     def __init__(self, index: int, width: int, height: int, fps: int):
         self.index, self.width, self.height, self.fps = index, width, height, fps
@@ -39,49 +94,35 @@ class CameraCapture:
         self.latest: CameraFrame | None = None
         self.error: str | None = None
         self.reported_fps = None
+        self.source_pixel_format = None
         self.thread = Thread(target=self._capture, daemon=True)
 
     def connect(self) -> None:
         self.thread.start()
         if not self.ready.wait(10):
+            self.stop.set()
             raise TimeoutError('camera did not supply a frame within 10 seconds')
 
         self.read()
 
     def _capture(self) -> None:
-        capture = cv2.VideoCapture(self.index)
         try:
-            if not capture.isOpened():
-                raise ConnectionError('camera could not be opened')
+            with open_camera(self.index, self.width, self.height, self.fps) as capture:
+                self.reported_fps = reported_camera_rate(capture)
+                for sequence, frame in enumerate(camera_frames(capture, self.stop)):
+                    timestamp = time.monotonic()
+                    if (frame.height, frame.width) != (self.height, self.width):
+                        raise ValueError('camera supplied different dimensions from the selected capture mode')
 
-            capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-            capture.set(cv2.CAP_PROP_FPS, self.fps)
-            actual = (round(capture.get(cv2.CAP_PROP_FRAME_WIDTH)), round(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-            if actual != (self.width, self.height):
-                raise ValueError(f'camera supplied {actual}, not requested {(self.width, self.height)}')
-
-            self.reported_fps = capture.get(cv2.CAP_PROP_FPS)
-            sequence = 0
-            while not self.stop.is_set():
-                ok, bgr = capture.read()
-                timestamp = time.monotonic()
-                if not ok:
-                    raise ConnectionError('camera stopped supplying frames')
-                if bgr.shape[:2] != (self.height, self.width):
-                    raise ValueError('camera frame dimensions changed from the selected capture mode')
-
-                rgb: UInt8[np.ndarray, 'H_src W_src C_in'] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                with self.lock:
-                    self.latest = CameraFrame(rgb, sequence, timestamp)
-                sequence += 1
-                self.ready.set()
+                    rgb: UInt8[np.ndarray, 'H_src W_src C_in'] = frame.to_ndarray(format='rgb24')
+                    self.source_pixel_format = frame.format.name
+                    with self.lock:
+                        self.latest = CameraFrame(rgb, sequence, timestamp)
+                    self.ready.set()
         except Exception as error:
             with self.lock:
                 self.error = str(error)
             self.ready.set()
-        finally:
-            capture.release()
 
     def read(self) -> CameraFrame:
         with self.lock:
@@ -141,7 +182,9 @@ class SO101Devices:
                 },
                 'camera': {'index': config['camera_index'], 'width': config['width'], 'height': config['height'],
                            'requested_frames_per_second': config['camera_fps'],
-                           'reported_frames_per_second': self.camera.reported_fps, 'color': 'RGB',
+                           'reported_frames_per_second': self.camera.reported_fps,
+                           'backend': 'pyav_avfoundation', 'source_pixel_format': self.camera.source_pixel_format,
+                           'color': 'RGB',
                            'timestamp_basis': 'host_read_complete_not_sensor_exposure'},
                 'action_timestamp_basis': 'host_command_write_return_not_motor_arrival',
             }
@@ -204,15 +247,11 @@ class DemoDevices:
 
 
 def inspect_camera(index: int) -> dict[str, Any]:
-    """Read the selected camera's reported default profile, not an exhaustive mode list."""
-    capture = cv2.VideoCapture(index)
-    try:
-        if not capture.isOpened():
-            raise ConnectionError('camera could not be opened')
-
-        return {'index': index, 'width': round(capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                'height': round(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                'reported_frames_per_second': capture.get(cv2.CAP_PROP_FPS),
-                'note': 'Reported default profile; requested modes are checked when connecting.'}
-    finally:
-        capture.release()
+    """Probe native frame geometry at 30 images per second, not every supported mode."""
+    with open_camera(index, fps=30) as capture:
+        frame = next(camera_frames(capture, Event()))
+        rate = reported_camera_rate(capture)
+        return {'index': index, 'width': frame.width, 'height': frame.height,
+                'reported_frames_per_second': rate, 'requested_frames_per_second': 30,
+                'backend': 'pyav_avfoundation', 'source_pixel_format': frame.format.name,
+                'note': 'Profile probed at 30 images per second; requested dimensions are checked when connecting.'}
