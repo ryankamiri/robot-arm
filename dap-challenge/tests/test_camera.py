@@ -81,6 +81,18 @@ class CameraTests(unittest.TestCase):
         self.assertTrue(camera.ready.is_set())
         self.assertEqual(camera.reported_fps, 30)
 
+    def test_clockwise_rotation_changes_pixels_and_geometry(self):
+        camera = CameraCapture(0, 8, 6, 30, rotation_clockwise=90)
+        rgb = np.arange(6 * 8 * 3, dtype=np.uint8).reshape(6, 8, 3)
+        frame = av.VideoFrame.from_ndarray(rgb, format='rgb24')
+        with patch('training.shared.devices.open_camera') as opened:
+            opened.return_value.__enter__.return_value = self.container()
+            with patch('training.shared.devices.camera_frames', return_value=iter([frame])):
+                camera._capture()
+        np.testing.assert_array_equal(camera.read().rgb, np.rot90(rgb, k=-1))
+        self.assertEqual(camera.read().rgb.shape, (8, 6, 3))
+        self.assertTrue(camera.read().rgb.flags.c_contiguous)
+
     def test_wrong_capture_dimensions_are_rejected_before_recording(self):
         camera = CameraCapture(0, 8, 6, 30)
         with patch('training.shared.devices.open_camera') as opened:

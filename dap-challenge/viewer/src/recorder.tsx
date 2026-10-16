@@ -40,8 +40,6 @@ export function Recorder() {
   const [discovering, setDiscovering] = useState(false);
   const [profile, setProfile] = useState('');
   const [countdown, setCountdown] = useState<number | null>(null);
-  const [rotation, setRotation] = useState(0);
-  const [videoSize, setVideoSize] = useState({ width: 4, height: 3 });
   const [form, setForm] = useState({
     leader_port: '', follower_port: '', leader_id: '', follower_id: '',
     calibration_dir: '', camera_index: '', width: '640', height: '480', camera_fps: '30',
@@ -124,10 +122,6 @@ export function Recorder() {
     }, 1000);
     return () => clearTimeout(timer);
   }, [countdown, status?.connected, status?.phase]);
-
-  const radians = rotation * Math.PI / 180;
-  const rotatedWidth = Math.abs(videoSize.width * Math.cos(radians)) + Math.abs(videoSize.height * Math.sin(radians));
-  const rotatedHeight = Math.abs(videoSize.width * Math.sin(radians)) + Math.abs(videoSize.height * Math.cos(radians));
 
   async function connect(event: FormEvent) {
     event.preventDefault();
@@ -224,18 +218,8 @@ export function Recorder() {
       {take && take.status !== 'recording' && <>
         <p>{take.status} · {take.row_count ?? 0} observations</p>
         {take.error && <p role="alert">{take.error}</p>}
-        <label>Preview rotation: {rotation}°
-          <input aria-label="Preview rotation" type="range" min="-180" max="180" step="1"
-            value={rotation} onChange={event => setRotation(Number(event.target.value))} />
-          <button onClick={() => setRotation(0)}>Reset rotation</button>
-        </label>
-        <p>Rotation changes this preview only. Saved videos and training images are unchanged.</p>
-        <div className="review-video" style={{ aspectRatio: `${rotatedWidth} / ${rotatedHeight}` }}>
-          <video key={takeId} controls preload="metadata" src={`/api/episodes/${encodeURIComponent(takeId)}/video`}
-            style={{ width: `${100 * videoSize.width / rotatedWidth}%`, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }}
-            onLoadedMetadata={event => setVideoSize({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight })}
-            onError={() => setVideoError(true)} />
-        </div>
+        <video key={takeId} controls preload="metadata" src={`/api/episodes/${encodeURIComponent(takeId)}/video`}
+          onError={() => setVideoError(true)} />
         {videoError && <p role="alert">Video could not be played. The pending files remain preserved.</p>}
         <p>Take missed deadlines: {take.diagnostics?.missed_deadlines ?? 'unavailable'} · Repeated camera frames: {take.diagnostics?.repeated_frames ?? 'unavailable'}</p>
         <div className="actions">

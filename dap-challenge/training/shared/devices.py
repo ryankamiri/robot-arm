@@ -86,7 +86,11 @@ def reported_camera_rate(capture: InputContainer) -> float | None:
 
 
 class CameraCapture:
-    def __init__(self, index: int, width: int, height: int, fps: int):
+    def __init__(self, index: int, width: int, height: int, fps: int, rotation_clockwise: int = 0):
+        if rotation_clockwise not in (0, 90, 180, 270):
+            raise ValueError('camera rotation must be 0, 90, 180 or 270 degrees')
+
+        self.rotation_clockwise = rotation_clockwise
         self.index, self.width, self.height, self.fps = index, width, height, fps
         self.lock = Lock()
         self.stop = Event()
@@ -115,6 +119,7 @@ class CameraCapture:
                         raise ValueError('camera supplied different dimensions from the selected capture mode')
 
                     rgb: UInt8[np.ndarray, 'H_src W_src C_in'] = frame.to_ndarray(format='rgb24')
+                    rgb = np.ascontiguousarray(np.rot90(rgb, k=-(self.rotation_clockwise // 90)))
                     self.source_pixel_format = frame.format.name
                     with self.lock:
                         self.latest = CameraFrame(rgb, sequence, timestamp)
@@ -162,7 +167,8 @@ class SO101Devices:
             raise ValueError('Calibrate both arm IDs with LeRobot first; web connections never prompt for calibration.')
 
         try:
-            self.camera = CameraCapture(config['camera_index'], config['width'], config['height'], config['camera_fps'])
+            self.camera = CameraCapture(config['camera_index'], config['width'], config['height'], config['camera_fps'],
+                                        config.get('rotation_clockwise', 90))
             self.camera.connect()
             self.leader.connect(calibrate=False)
             if not self.leader.is_calibrated:
@@ -180,7 +186,9 @@ class SO101Devices:
                     'leader': {name: asdict(value) for name, value in self.leader.calibration.items()},
                     'follower': {name: asdict(value) for name, value in self.follower.calibration.items()},
                 },
-                'camera': {'index': config['camera_index'], 'width': config['width'], 'height': config['height'],
+                'camera': {'index': config['camera_index'], 'width': self.camera.read().rgb.shape[1], 'height': self.camera.read().rgb.shape[0],
+                           'capture_width': config['width'], 'capture_height': config['height'],
+                           'rotation_clockwise': self.camera.rotation_clockwise,
                            'requested_frames_per_second': config['camera_fps'],
                            'reported_frames_per_second': self.camera.reported_fps,
                            'backend': 'pyav_avfoundation', 'source_pixel_format': self.camera.source_pixel_format,

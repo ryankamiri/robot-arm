@@ -3,7 +3,7 @@
 import argparse
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request
@@ -31,6 +31,7 @@ class ConnectionSettings(BaseModel):
     width: Annotated[int, Field(gt=0)]
     height: Annotated[int, Field(gt=0)]
     camera_fps: Annotated[int, Field(gt=0)] = 30
+    rotation_clockwise: Literal[0, 90, 180, 270] = 90
     leader_serial: str | None = None
     follower_serial: str | None = None
     camera_device_id: str | None = None
