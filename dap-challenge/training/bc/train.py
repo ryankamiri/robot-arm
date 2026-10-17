@@ -1,6 +1,7 @@
 """Behavior cloning entry point with held-out validation and latest/best checkpoints."""
 
 import argparse
+from dataclasses import dataclass
 import math
 from pathlib import Path
 from typing import Any, Mapping
@@ -21,33 +22,45 @@ from training.shared.metrics import log_metrics, start_run
 from training.shared.randomness import seed_training
 
 
-def batch_nll(
+@dataclass
+class BatchMetrics:
+    """Per-observation likelihood loss and deterministic normalized action error."""
+
+    nll: Float[Tensor, 'B']
+    action_mae: Float[Tensor, 'B']
+
+
+def batch_metrics(
     policy: DapPolicy, batch: Mapping[str, Any], device: torch.device, epsilon: float,
-) -> Float[Tensor, 'B']:
-    """Move observations and expert targets to the chosen float32 training device."""
+) -> BatchMetrics:
+    """Compute NLL and action MAE from the same forward pass."""
     images: Float[Tensor, 'B L I C_in H_in W_in'] = batch['images'].to(device=device, dtype=torch.float32)
     positions: Float[Tensor, 'B L A'] = batch['positions'].to(device=device, dtype=torch.float32)
     targets: Float[Tensor, 'B A'] = batch['expert_action'].to(device=device, dtype=torch.float32)
-    return expert_nll(policy(images, positions), targets, epsilon)
+    parameters = policy(images, positions)
+    action_mae: Float[Tensor, 'B'] = (parameters.mean.detach().tanh() - targets).abs().mean(dim=-1)
+    return BatchMetrics(expert_nll(parameters, targets, epsilon), action_mae)
 
 
 def evaluate(
     policy: DapPolicy, loader: DataLoader[BCSample], device: torch.device, epsilon: float,
-) -> float:
+) -> dict[str, float]:
     """Weight every held-out window equally and restore the policy's previous mode."""
     previous_mode = policy.training
-    total, count = 0.0, 0
+    totals = {'nll': 0.0, 'action_mae': 0.0}
+    count = 0
     policy.eval()
     try:
         with torch.inference_mode():
             for batch in loader:
-                losses: Float[Tensor, 'B'] = batch_nll(policy, batch, device, epsilon)
-                total += losses.sum().item()
-                count += losses.numel()
-        if count == 0 or not math.isfinite(total):
-            raise ValueError('validation must contain samples and have finite NLL')
+                metrics = batch_metrics(policy, batch, device, epsilon)
+                totals['nll'] += metrics.nll.sum().item()
+                totals['action_mae'] += metrics.action_mae.sum().item()
+                count += metrics.nll.numel()
+        if count == 0 or any(not math.isfinite(value) for value in totals.values()):
+            raise ValueError('validation must contain samples and have finite metrics')
 
-        return total / count
+        return {f'val/{key}': value / count for key, value in totals.items()}
     finally:
         policy.train(previous_mode)
 
@@ -121,14 +134,14 @@ def train(
                         {'split': split, 'best_validation_nll': best_nll,
                          'epoch_generator_state': epoch_generator_state, 'wandb_run_id': run.id})
 
-    def validation() -> float:
+    def validation() -> dict[str, float]:
         nonlocal best_nll, last_evaluation_step
-        value = evaluate(policy, loaders.validation, target_device, epsilon)
-        if value < best_nll:
-            best_nll = value
+        metrics = evaluate(policy, loaders.validation, target_device, epsilon)
+        if metrics['val/nll'] < best_nll:
+            best_nll = metrics['val/nll']
             checkpoint(output / 'best.pt')
         last_evaluation_step = step
-        return value
+        return metrics
 
     try:
         policy.train()
@@ -139,7 +152,8 @@ def train(
                 next(iterator)
             for batch in iterator:
                 optimizer.zero_grad(set_to_none=True)
-                loss: Float[Tensor, ''] = batch_nll(policy, batch, target_device, epsilon).mean()
+                batch_values = batch_metrics(policy, batch, target_device, epsilon)
+                loss: Float[Tensor, ''] = batch_values.nll.mean()
                 if not torch.isfinite(loss):
                     raise FloatingPointError('non-finite training loss; no update performed')
 
@@ -150,9 +164,9 @@ def train(
                 optimizer.step()
                 step += 1
                 next_batch += 1
-                metrics = {'train/nll': loss.item(), 'train/gradient_norm': gradient_norm.item(), 'train/epoch': epoch}
+                metrics = {'train/nll': loss.item(), 'train/action_mae': batch_values.action_mae.mean().item(), 'train/gradient_norm': gradient_norm.item(), 'train/epoch': epoch}
                 if step % settings['evaluation']['every_steps'] == 0:
-                    metrics['val/nll'] = validation()
+                    metrics.update(validation())
                 if step % settings['checkpoint']['every_steps'] == 0:
                     checkpoint(output / 'latest.pt')
                 log_metrics(run, metrics, step)
@@ -160,7 +174,7 @@ def train(
             next_batch = 0
             epoch_generator_state = loaders.generator.get_state()
         if settings['evaluation']['at_end'] and last_evaluation_step != step:
-            log_metrics(run, {'val/nll': validation()}, step)
+            log_metrics(run, validation(), step)
         checkpoint(output / 'latest.pt')
     finally:
         run.finish()

@@ -23,7 +23,7 @@ from models.architecture import GaussianParameters
 from models.dimensions import A
 from models.policy import DapPolicy
 from training.bc.loss import expert_nll
-from training.bc.train import evaluate, train
+from training.bc.train import BatchMetrics, batch_metrics, evaluate, train
 from training.shared.config import load_config
 from training.shared.normalization import JOINT_NAMES, denormalize_controller
 
@@ -98,13 +98,26 @@ class BCTrainingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 expert_nll(parameters, torch.full((1, A), value), 1e-4)
 
+    def test_action_mae_uses_deterministic_bounded_actions_not_pre_tanh_mean(self):
+        policy = Mock(return_value=GaussianParameters(torch.full((2, A), math.atanh(0.5)), torch.zeros(2, A)))
+        batch = {'images': torch.zeros(2, 3, 2, 3, 6, 8), 'positions': torch.zeros(2, 3, A),
+                 'expert_action': torch.tensor([[0.] * A, [1.] * A])}
+        values = batch_metrics(policy, batch, torch.device('cpu'), 1e-4)
+        torch.testing.assert_close(values.action_mae, torch.full((2,), 0.5))
+        policy.assert_called_once()
+
     def test_validation_weights_samples_including_partial_batch_and_restores_mode(self):
         policy = DapPolicy(3)
         loader = DataLoader([0, 1, 2], batch_size=2)
-        with patch('training.bc.train.batch_nll', side_effect=[torch.tensor([1., 2.]), torch.tensor([9.])]):
-            self.assertEqual(evaluate(policy, loader, torch.device('cpu'), 1e-4), 4.)
+        with patch('training.bc.train.batch_metrics', side_effect=[
+            BatchMetrics(torch.tensor([1., 2.]), torch.tensor([0., 0.])),
+            BatchMetrics(torch.tensor([9.]), torch.tensor([0.9])),
+        ]):
+            metrics = evaluate(policy, loader, torch.device('cpu'), 1e-4)
+            self.assertEqual(metrics['val/nll'], 4.)
+            self.assertAlmostEqual(metrics['val/action_mae'], 0.3, places=6)
         self.assertTrue(policy.training)
-        with patch('training.bc.train.batch_nll', side_effect=RuntimeError('failed')):
+        with patch('training.bc.train.batch_metrics', side_effect=RuntimeError('failed')):
             with self.assertRaises(RuntimeError):
                 evaluate(policy, loader, torch.device('cpu'), 1e-4)
         self.assertTrue(policy.training)
@@ -114,7 +127,7 @@ class BCTrainingTests(unittest.TestCase):
         self.config['training']['evaluation']['every_steps'] = 1
         output = self.root / 'run'
         with patch('training.bc.train.start_run', return_value=self.run):
-            with patch('training.bc.train.evaluate', side_effect=[2., 1., 3., 4., 5., 6.]):
+            with patch('training.bc.train.evaluate', side_effect=[{'val/nll': value, 'val/action_mae': 0.1} for value in [2., 1., 3., 4., 5., 6.]]):
                 train(self.config, output, 'cpu', 'test', 'disabled')
         latest = torch.load(output / 'latest.pt', weights_only=True)
         best = torch.load(output / 'best.pt', weights_only=True)
@@ -125,6 +138,9 @@ class BCTrainingTests(unittest.TestCase):
         self.assertFalse(set(split['train']) & set(split['validation']))
         self.assertEqual(len(split['validation']), 1)
         self.assertEqual(sorted(path.name for path in output.glob('*.pt')), ['best.pt', 'latest.pt'])
+        logged = [call.args[0] for call in self.run.log.call_args_list]
+        self.assertTrue(all('train/action_mae' in row for row in logged))
+        self.assertTrue(all('val/action_mae' in row for row in logged))
         self.run.finish.assert_called_once()
         with self.assertRaises(FileExistsError):
             train(self.config, output, 'cpu', 'test', 'disabled')
@@ -151,7 +167,7 @@ class BCTrainingTests(unittest.TestCase):
         self.episodes()
         self.config['training']['evaluation']['every_steps'] = 100
         with patch('training.bc.train.start_run', return_value=self.run):
-            with patch('training.bc.train.evaluate', return_value=2.) as validation:
+            with patch('training.bc.train.evaluate', return_value={'val/nll': 2., 'val/action_mae': 0.1}) as validation:
                 train(self.config, self.root / 'final', 'cpu', 'test', 'disabled')
         validation.assert_called_once()
         self.assertTrue((self.root / 'final/best.pt').is_file())
