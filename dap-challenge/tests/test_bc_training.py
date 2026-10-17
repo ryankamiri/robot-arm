@@ -110,37 +110,63 @@ class BCTrainingTests(unittest.TestCase):
         policy = DapPolicy(3)
         loader = DataLoader([0, 1, 2], batch_size=2)
         with patch('training.bc.train.batch_metrics', side_effect=[
-            BatchMetrics(torch.tensor([1., 2.]), torch.tensor([0., 0.])),
-            BatchMetrics(torch.tensor([9.]), torch.tensor([0.9])),
+            BatchMetrics(torch.tensor([1., 2.]), torch.tensor([0., 0.]), torch.tensor([1., 2.])),
+            BatchMetrics(torch.tensor([9.]), torch.tensor([0.9]), torch.tensor([9.])),
         ]):
             metrics = evaluate(policy, loader, torch.device('cpu'), 1e-4)
             self.assertEqual(metrics['val/nll'], 4.)
             self.assertAlmostEqual(metrics['val/action_mae'], 0.3, places=6)
+            self.assertEqual(metrics['val/mean_abs_z'], 4.)
         self.assertTrue(policy.training)
         with patch('training.bc.train.batch_metrics', side_effect=RuntimeError('failed')):
             with self.assertRaises(RuntimeError):
                 evaluate(policy, loader, torch.device('cpu'), 1e-4)
         self.assertTrue(policy.training)
 
+    def test_standardized_error_uses_pre_tanh_coordinates_and_per_target_scales(self):
+        mean: Float[Tensor, 'B A'] = torch.zeros(2, A, requires_grad=True)
+        log_std: Float[Tensor, 'B A'] = torch.tensor([[math.log(0.5)] * A, [math.log(2.)] * A], requires_grad=True)
+        policy = Mock(return_value=GaussianParameters(mean, log_std))
+        targets: Float[Tensor, 'B A'] = torch.tensor([[math.tanh(1.)] * A, [math.tanh(-1.)] * A])
+        batch = {'images': torch.zeros(2, 3, 2, 3, 6, 8), 'positions': torch.zeros(2, 3, A),
+                 'expert_action': targets}
+        metrics = batch_metrics(policy, batch, torch.device('cpu'), 1e-4)
+        torch.testing.assert_close(metrics.mean_abs_z, torch.tensor([2., 0.5]))
+        self.assertFalse(metrics.mean_abs_z.requires_grad)
+        self.assertAlmostEqual(metrics.mean_abs_z.mean().item(), 1.25, places=6)
+        batch['expert_action'] = torch.tensor([[-1.] * A, [1.] * A])
+        endpoint_metrics = batch_metrics(policy, batch, torch.device('cpu'), 1e-4)
+        self.assertTrue(torch.isfinite(endpoint_metrics.mean_abs_z).all())
+
     def test_latest_and_best_keep_distinct_steps_and_rollout_ids(self):
         self.episodes()
         self.config['training']['evaluation']['every_steps'] = 1
         output = self.root / 'run'
+        validation_metrics = [
+            {'val/nll': nll, 'val/action_mae': mae, 'val/mean_abs_z': 0.8}
+            for nll, mae in zip([2., 1., 3., 4., 5., 6.], [0.6, 0.5, 0.4, 0.3, 0.2, 0.25])
+        ]
         with patch('training.bc.train.start_run', return_value=self.run):
-            with patch('training.bc.train.evaluate', side_effect=[{'val/nll': value, 'val/action_mae': 0.1} for value in [2., 1., 3., 4., 5., 6.]]):
+            with patch('training.bc.train.evaluate', side_effect=validation_metrics):
                 train(self.config, output, 'cpu', 'test', 'disabled')
         latest = torch.load(output / 'latest.pt', weights_only=True)
         best = torch.load(output / 'best.pt', weights_only=True)
+        best_mae = torch.load(output / 'best_mae.pt', weights_only=True)
         self.assertEqual(latest['progress']['optimizer_step'], 6)
         self.assertEqual(best['progress']['optimizer_step'], 2)
+        self.assertEqual(best_mae['progress']['optimizer_step'], 5)
         self.assertEqual(latest['extra_state']['best_validation_nll'], 1.)
+        self.assertEqual(latest['extra_state']['best_validation_action_mae'], 0.2)
+        self.assertEqual(best_mae['extra_state']['best_validation_nll'], 1.)
         split = latest['extra_state']['split']
         self.assertFalse(set(split['train']) & set(split['validation']))
         self.assertEqual(len(split['validation']), 1)
-        self.assertEqual(sorted(path.name for path in output.glob('*.pt')), ['best.pt', 'latest.pt'])
+        self.assertEqual(sorted(path.name for path in output.glob('*.pt')), ['best.pt', 'best_mae.pt', 'latest.pt'])
         logged = [call.args[0] for call in self.run.log.call_args_list]
         self.assertTrue(all('train/action_mae' in row for row in logged))
+        self.assertTrue(all('train/mean_abs_z' in row for row in logged))
         self.assertTrue(all('val/action_mae' in row for row in logged))
+        self.assertTrue(all('val/mean_abs_z' in row for row in logged))
         self.run.finish.assert_called_once()
         with self.assertRaises(FileExistsError):
             train(self.config, output, 'cpu', 'test', 'disabled')
@@ -157,6 +183,7 @@ class BCTrainingTests(unittest.TestCase):
         resumed = torch.load(self.root / 'resumed/latest.pt', weights_only=True)
         self.assertEqual(full['progress'], resumed['progress'])
         self.assertEqual(full['extra_state']['best_validation_nll'], resumed['extra_state']['best_validation_nll'])
+        self.assertEqual(full['extra_state']['best_validation_action_mae'], resumed['extra_state']['best_validation_action_mae'])
         for key, value in full['models']['actor'].items():
             torch.testing.assert_close(value, resumed['models']['actor'][key], rtol=0, atol=0)
         for key, state in full['optimizers']['actor']['state'].items():
@@ -171,6 +198,7 @@ class BCTrainingTests(unittest.TestCase):
                 train(self.config, self.root / 'final', 'cpu', 'test', 'disabled')
         validation.assert_called_once()
         self.assertTrue((self.root / 'final/best.pt').is_file())
+        self.assertTrue((self.root / 'final/best_mae.pt').is_file())
 
     @unittest.skipUnless(torch.backends.mps.is_available(), 'Apple MPS unavailable')
     def test_full_training_loop_on_mps_with_disabled_wandb(self):

@@ -1,4 +1,4 @@
-"""Behavior cloning entry point with held-out validation and latest/best checkpoints."""
+"""Behavior cloning with held-out validation and latest/best-NLL/best-MAE checkpoints."""
 
 import argparse
 from dataclasses import dataclass
@@ -24,22 +24,29 @@ from training.shared.randomness import seed_training
 
 @dataclass
 class BatchMetrics:
-    """Per-observation likelihood loss and deterministic normalized action error."""
+    """Per-observation NLL, bounded action error and pre-tanh standardized error."""
 
     nll: Float[Tensor, 'B']
     action_mae: Float[Tensor, 'B']
+    mean_abs_z: Float[Tensor, 'B']
 
 
 def batch_metrics(
     policy: DapPolicy, batch: Mapping[str, Any], device: torch.device, epsilon: float,
 ) -> BatchMetrics:
-    """Compute NLL and action MAE from the same forward pass."""
+    """Compute loss and detached accuracy/calibration metrics from one forward pass."""
     images: Float[Tensor, 'B L I C_in H_in W_in'] = batch['images'].to(device=device, dtype=torch.float32)
     positions: Float[Tensor, 'B L A'] = batch['positions'].to(device=device, dtype=torch.float32)
     targets: Float[Tensor, 'B A'] = batch['expert_action'].to(device=device, dtype=torch.float32)
     parameters = policy(images, positions)
+    nll = expert_nll(parameters, targets, epsilon)
     action_mae: Float[Tensor, 'B'] = (parameters.mean.detach().tanh() - targets).abs().mean(dim=-1)
-    return BatchMetrics(expert_nll(parameters, targets, epsilon), action_mae)
+    pre_tanh_targets: Float[Tensor, 'B A'] = targets.clamp(-1 + epsilon, 1 - epsilon).atanh()
+    standardized_errors: Float[Tensor, 'B A'] = (
+        (pre_tanh_targets - parameters.mean.detach()).abs() / parameters.log_std.detach().exp()
+    )
+    mean_abs_z: Float[Tensor, 'B'] = standardized_errors.mean(dim=-1)
+    return BatchMetrics(nll, action_mae, mean_abs_z)
 
 
 def evaluate(
@@ -47,7 +54,7 @@ def evaluate(
 ) -> dict[str, float]:
     """Weight every held-out window equally and restore the policy's previous mode."""
     previous_mode = policy.training
-    totals = {'nll': 0.0, 'action_mae': 0.0}
+    totals = {'nll': 0.0, 'action_mae': 0.0, 'mean_abs_z': 0.0}
     count = 0
     policy.eval()
     try:
@@ -56,6 +63,7 @@ def evaluate(
                 metrics = batch_metrics(policy, batch, device, epsilon)
                 totals['nll'] += metrics.nll.sum().item()
                 totals['action_mae'] += metrics.action_mae.sum().item()
+                totals['mean_abs_z'] += metrics.mean_abs_z.sum().item()
                 count += metrics.nll.numel()
         if count == 0 or any(not math.isfinite(value) for value in totals.values()):
             raise ValueError('validation must contain samples and have finite metrics')
@@ -104,6 +112,7 @@ def train(
                       weight_decay=settings['optimizer']['weight_decay'])
     split = {'train': list(loaders.train_episode_ids), 'validation': list(loaders.validation_episode_ids)}
     epoch, next_batch, step, best_nll = 0, 0, 0, math.inf
+    best_mae = math.inf
     epoch_generator_state: UInt8[Tensor, 'N_rng'] = loaders.generator.get_state()
     previous_run_id = None
     if resume is not None:
@@ -116,6 +125,7 @@ def train(
 
         epoch, next_batch, step = (state.progress[key] for key in ('epoch', 'next_batch', 'optimizer_step'))
         best_nll = state.extra_state['best_validation_nll']
+        best_mae = state.extra_state.get('best_validation_action_mae', math.inf)
         epoch_generator_state = state.extra_state['epoch_generator_state']
         previous_run_id = state.extra_state['wandb_run_id']
     else:
@@ -132,14 +142,22 @@ def train(
         save_checkpoint(path, {'actor': policy}, {'actor': optimizer}, config,
                         {'epoch': epoch, 'next_batch': next_batch, 'optimizer_step': step},
                         {'split': split, 'best_validation_nll': best_nll,
+                         'best_validation_action_mae': best_mae,
                          'epoch_generator_state': epoch_generator_state, 'wandb_run_id': run.id})
 
     def validation() -> dict[str, float]:
-        nonlocal best_nll, last_evaluation_step
+        nonlocal best_nll, best_mae, last_evaluation_step
         metrics = evaluate(policy, loaders.validation, target_device, epsilon)
-        if metrics['val/nll'] < best_nll:
+        improved_nll = metrics['val/nll'] < best_nll
+        improved_mae = metrics['val/action_mae'] < best_mae
+        if improved_nll:
             best_nll = metrics['val/nll']
+        if improved_mae:
+            best_mae = metrics['val/action_mae']
+        if improved_nll:
             checkpoint(output / 'best.pt')
+        if improved_mae:
+            checkpoint(output / 'best_mae.pt')
         last_evaluation_step = step
         return metrics
 
@@ -164,7 +182,12 @@ def train(
                 optimizer.step()
                 step += 1
                 next_batch += 1
-                metrics = {'train/nll': loss.item(), 'train/action_mae': batch_values.action_mae.mean().item(), 'train/gradient_norm': gradient_norm.item(), 'train/epoch': epoch}
+                metrics = {
+                    'train/nll': loss.item(),
+                    'train/action_mae': batch_values.action_mae.mean().item(),
+                    'train/mean_abs_z': batch_values.mean_abs_z.mean().item(),
+                    'train/gradient_norm': gradient_norm.item(), 'train/epoch': epoch,
+                }
                 if step % settings['evaluation']['every_steps'] == 0:
                     metrics.update(validation())
                 if step % settings['checkpoint']['every_steps'] == 0:
