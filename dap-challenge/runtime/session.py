@@ -90,7 +90,7 @@ class RuntimeSession:
         if not self.thread.is_alive() or self.shutdown.is_set():
             raise RuntimeError('Inference worker is not running.')
         values = payload or {}
-        if command in ('stop', 'disconnect') and values.get('client_id') == self.client_id:
+        if command in ('stop', 'disconnect', 'reset') and values.get('client_id') == self.client_id:
             self.motion_cancel.set()
 
         future = Future()
@@ -186,7 +186,7 @@ class RuntimeSession:
             self.pose = pose
             self._update(starting_pose=pose)
         elif command in ('start', 'reset'):
-            if self.state['phase'] in ('running', 'resetting'):
+            if self.state['phase'] == 'resetting' or (command == 'start' and self.state['phase'] == 'running'):
                 raise ValueError('Stop the current attempt first.')
             if self.pose is None or self.pose['identity'] != self._signature():
                 raise ValueError('Capture a starting pose for this follower and calibration first.')
@@ -204,7 +204,10 @@ class RuntimeSession:
                 self.runner.reset()
                 self._update(phase='running', action_mode=payload['mode'], error=None, hold_confirmed=False)
             else:
+                if self.runner is not None:
+                    self.runner.reset()
                 self.reset_started = self.clock()
+                self.reset_target = positions.copy()
                 self._update(phase='resetting', error=None, hold_confirmed=False)
             self.state['diagnostics']['consecutive_misses'] = 0
             self.motion_cancel.clear()
@@ -243,7 +246,10 @@ class RuntimeSession:
 
             delta = min(control['max_target_delta'], control['reset_speed_per_second'] * min(elapsed, .1))
             requested = self.pose['positions']
-            targets = [max(p-delta,min(p+delta,t)) for p,t in zip(positions,requested,strict=True)]
+            # Advance the command trajectory even when a motor has not reached the previous small goal.
+            planned = [max(p-delta,min(p+delta,t)) for p,t in zip(self.reset_target,requested,strict=True)]
+            limit = control['max_target_delta']
+            targets = [max(p-limit,min(p+limit,t)) for p,t in zip(positions,planned,strict=True)]
         else:
             self.runner.observe(arm, mac, positions, self.metadata['camera']['rotation_clockwise'])
             prediction_started = self.clock()
@@ -260,6 +266,8 @@ class RuntimeSession:
             raise TimeoutError('Prediction became stale before command transmission.')
 
         sent = self.devices.send_target(targets)
+        if self.state['phase'] == 'resetting':
+            self.reset_target = list(sent)
         self._update(requested_target=requested, sent_target=sent)
         if targets != requested:
             self.state['diagnostics']['limited_commands'] += 1
@@ -280,7 +288,7 @@ class RuntimeSession:
                             self._command(command,payload)
                             future.set_result(self.snapshot())
                         except Exception as error:
-                            if self.devices is not None and (command in ('stop','disconnect','capture_pose') or not isinstance(error,ValueError)):
+                            if self.devices is not None and (command in ('stop','disconnect','capture_pose','reset') or not isinstance(error,ValueError)):
                                 self._fault(error)
                             future.set_exception(error)
                 if self.devices is not None:

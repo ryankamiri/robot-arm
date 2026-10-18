@@ -145,6 +145,44 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'calibration'):
             self.session._command('reset',self.owner)
 
+    def test_return_interrupts_policy_and_finishes_holding_without_predictions(self):
+        self.capture_start()
+        self.devices.positions[0] = 10.
+        with patch.object(self.runner, 'predict', wraps=self.runner.predict) as predict:
+            self.session._command('reset', self.owner)
+            for _ in range(40):
+                self.session._tick(self.now, 1/30)
+                if self.session.snapshot()['phase'] == 'holding':
+                    break
+            predict.assert_not_called()
+        self.assertEqual(self.session.snapshot()['phase'], 'holding')
+        self.assertLessEqual(abs(self.devices.positions[0]), self.config['control']['reset_tolerance'])
+
+    def test_return_advances_command_when_small_goals_do_not_move_motor(self):
+        self.session._command('capture_pose', self.owner)
+        self.devices.positions[0] = 10.
+        sent = []
+
+        def sluggish_motor(targets):
+            sent.append((self.devices.positions.copy(), targets.copy()))
+            if abs(targets[0] - self.devices.positions[0]) >= 1.25:
+                self.devices.positions = targets.copy()
+            return targets.copy()
+
+        with patch.object(self.devices, 'send_target', side_effect=sluggish_motor):
+            self.session._command('reset', self.owner)
+            for _ in range(80):
+                self.session._tick(self.now, 1/30)
+                if self.session.snapshot()['phase'] == 'holding':
+                    break
+        self.assertEqual(self.session.snapshot()['phase'], 'holding')
+        self.assertLessEqual(abs(self.devices.positions[0]), self.config['control']['reset_tolerance'])
+        for measured, target in sent:
+            self.assertLessEqual(max(abs(a-b) for a,b in zip(measured, target)), self.config['control']['max_target_delta'])
+        goals = [target[0] for _, target in sent[:-1]]
+        for previous, following in zip(goals, goals[1:]):
+            self.assertLessEqual(abs(following-previous), self.config['control']['reset_speed_per_second']/30 + 1e-6)
+
     def test_active_snapshots_cannot_be_replaced_and_another_browser_cannot_control(self):
         self.capture_start()
         with self.assertRaises(ValueError):

@@ -108,10 +108,11 @@ export function Inference() {
           <button disabled={busy || !owned || moving || !loaded || !status.starting_pose} onClick={() => void action('start', { mode })}>Start policy</button>
           <button disabled={!owned} onClick={() => void action('stop')}>Stop policy / hold</button>
           <button disabled={busy || !owned || moving} onClick={() => void action('pose/capture')}>Capture starting pose</button>
-          <button disabled={busy || !owned || moving || !status.starting_pose} onClick={() => void action('pose/return')}>Return to start</button>
+          <button disabled={busy || !owned || status.phase === 'resetting' || !status.starting_pose} onClick={() => void action('pose/return')}>{status.phase === 'resetting' ? 'Returning to start…' : 'Return to start'}</button>
           <button disabled={!owned} onClick={() => void action('disconnect')}>Disconnect / release motors</button>
         </div>
         <p>{moving ? 'Runtime is sending position targets.' : status.hold_confirmed ? 'Hold command sent.' : 'Hold command not confirmed.'} Support the follower before Disconnect.</p>
+        <p>Return to start stops the policy and moves the follower to the captured pose, then holds there.</p>
         <p>Starting pose: {status.starting_pose?.positions.map(value => value.toFixed(2)).join(', ') ?? 'Not captured'}</p>
         <p>Current positions: {status.positions?.map(value => value.toFixed(2)).join(', ') ?? 'Unavailable'}</p>
         <p>Requested target: {status.requested_target?.map(value => value.toFixed(2)).join(', ') ?? 'None'}</p>
