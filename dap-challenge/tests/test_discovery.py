@@ -9,7 +9,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from recording.server import create_app
-from training.shared.discovery import remember_profile, resolve_connection, resolve_profile
+from shared.discovery import remember_profile, resolve_connection, resolve_profile
 
 
 class DiscoveryTests(unittest.TestCase):

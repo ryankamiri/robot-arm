@@ -16,9 +16,10 @@ import torch
 from recording.server import create_app
 from recording.session import RecorderSession
 from recording.storage import EpisodeStore, EpisodeWriter
-from training.shared.devices import DemoDevices, SO101Devices
+from shared.devices import SO101Devices
+from shared.demo_devices import DemoDevices
 from training.shared.episodes import discover_episodes, load_episode
-from training.shared.normalization import JOINT_NAMES, normalize_controller, denormalize_controller
+from shared.normalization import JOINT_NAMES, normalize_controller, denormalize_controller
 
 
 class ControlledDevices(DemoDevices):

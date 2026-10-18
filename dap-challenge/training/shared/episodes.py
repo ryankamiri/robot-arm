@@ -13,8 +13,8 @@ import torch
 from torch import Tensor
 
 from models.dimensions import A
-from .observations import preprocess_image
-from .normalization import normalize_controller
+from shared.observations import preprocess_image
+from shared.normalization import normalize_controller
 
 
 @dataclass

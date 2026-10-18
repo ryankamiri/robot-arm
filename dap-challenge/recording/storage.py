@@ -16,9 +16,9 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from training.shared.devices import CameraFrame
+from shared.devices import CameraFrame
 from models.dimensions import A
-from training.shared.normalization import JOINT_NAMES
+from shared.normalization import JOINT_NAMES
 
 
 def write_metadata(directory: Path, metadata: dict[str, Any]) -> None:

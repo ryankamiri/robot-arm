@@ -9,13 +9,15 @@ from threading import Event, Lock, Thread
 import time
 from typing import Any, Callable
 
-from training.shared.devices import Devices, SO101Devices, inspect_camera
+from shared.devices import Devices, SO101Devices, inspect_camera
+from shared.ownership import HardwareLease
 from recording.storage import EpisodeStore, EpisodeWriter
 
 
 class RecorderSession:
     def __init__(self, root: Path, factory: Callable[[dict[str, Any]], Devices] = SO101Devices):
         self.store = EpisodeStore(root, recover=False)
+        self.lease = HardwareLease(root.parent / 'local' / 'hardware.lock')
         self.factory = factory
         self.next_tick_at = 0.0
         self.devices: Devices | None = None
@@ -82,9 +84,10 @@ class RecorderSession:
             if self.devices is not None or self.cleanup_failed:
                 raise ValueError('already connected or prior cleanup failed; inspect status')
 
-            devices = self.factory(payload)
-            self.devices = devices
+            self.lease.acquire('BC recorder')
             try:
+                devices = self.factory(payload)
+                self.devices = devices
                 self.device_metadata = devices.connect()
             except Exception as error:
                 self._fault(error)
@@ -126,7 +129,11 @@ class RecorderSession:
             if self.devices is not None:
                 raise ValueError('disconnect before inspecting camera settings')
 
-            self._update(camera_profile=inspect_camera(payload['camera_index']))
+            self.lease.acquire('camera inspection')
+            try:
+                self._update(camera_profile=inspect_camera(payload['camera_index']))
+            finally:
+                self.lease.release('camera inspection')
         else:
             raise ValueError('unknown recorder command')
 
@@ -139,6 +146,8 @@ class RecorderSession:
             except Exception:
                 self.cleanup_failed = True
                 raise
+        if not self.cleanup_failed:
+            self.lease.release('BC recorder')
 
     def _begin_finalization(self, error: str | None = None) -> None:
         writer, self.writer = self.writer, None

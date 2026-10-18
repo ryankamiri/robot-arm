@@ -13,10 +13,15 @@ from pydantic import BaseModel, Field, model_validator
 from serial.tools.list_ports import comports
 import uvicorn
 
-from training.shared.discovery import camera_source, device_inventory, load_profile, remember_profile, resolve_profile, resolve_connection
+from shared.discovery import camera_source, device_inventory, load_profile, remember_profile, resolve_profile, resolve_connection
 from recording.session import RecorderSession
-from training.shared.devices import DemoDevices, SO101Devices
-from training.shared.config import load_config
+from shared.devices import SO101Devices
+from shared.demo_devices import DemoDevices, DemoFollower
+from shared.config import load_config
+from runtime.api import inference_router
+from runtime.session import RuntimeSession
+from runtime.streaming import CameraPeers
+from shared.devices import FollowerDevices
 
 PROJECT = Path(__file__).resolve().parents[1]
 
@@ -59,7 +64,8 @@ class EpisodeKeep(EpisodeSelection):
     notes: str = ''
 
 
-def create_app(session: RecorderSession | None = None, demo: bool = False, profile_path: Path | None = None) -> FastAPI:
+def create_app(session: RecorderSession | None = None, demo: bool = False, profile_path: Path | None = None,
+               runtime: RuntimeSession | None = None) -> FastAPI:
     if profile_path is None:
         profile_path = PROJECT / 'local' / 'connection.json'
 
@@ -69,16 +75,30 @@ def create_app(session: RecorderSession | None = None, demo: bool = False, profi
         root = root / '.demo'
     if not session:
         session = RecorderSession(root, (lambda config: DemoDevices()) if demo else SO101Devices)
+    if runtime is None:
+        pose_name = 'runtime-pose-demo.yaml' if demo else 'runtime-pose.yaml'
+        runtime = RuntimeSession(load_config(PROJECT / 'configs/runtime.yaml'), profile_path.parent / pose_name,
+                                 session.lease, (lambda settings: DemoFollower()) if demo else FollowerDevices)
+
+    media = CameraPeers(runtime.preview_frame, runtime.preview_identity)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         session.start()
+        runtime.start()
         try:
             yield
         finally:
-            session.close()
+            try:
+                await media.close()
+            finally:
+                try:
+                    runtime.close()
+                finally:
+                    session.close()
 
     app = FastAPI(lifespan=lifespan)
+    app.include_router(inference_router(runtime, PROJECT / 'runs', demo, media))
 
     @app.middleware('http')
     async def local_commands_only(request: Request, call_next):
@@ -189,6 +209,7 @@ def create_app(session: RecorderSession | None = None, demo: bool = False, profi
         app.mount('/assets', StaticFiles(directory=dist / 'assets'), name='assets')
 
         @app.get('/record/bc')
+        @app.get('/inference')
         @app.get('/')
         def viewer():
             return FileResponse(dist / 'index.html')

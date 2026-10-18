@@ -1,4 +1,8 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useState } from 'react';
+import { api } from './api';
+import { ConnectionPanel } from './components/connection-panel';
+import { CameraPanel } from './components/camera-panel';
+import { SessionStatus } from './components/session-status';
 
 type Take = {
   episode_id: string;
@@ -22,15 +26,6 @@ type Status = {
   diagnostics: { missed_deadlines: number; max_cycle_s: number; camera_age_s: number };
 };
 
-async function api(path: string, body?: unknown) {
-  const response = await fetch(`/api/${path}`, body === undefined ? {} : {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail));
-  return data;
-}
-
 export function Recorder() {
   const [status, setStatus] = useState<Status | null>(null);
   const [error, setError] = useState('');
@@ -40,17 +35,7 @@ export function Recorder() {
   const [episodeNotes, setEpisodeNotes] = useState('');
   const [lastKept, setLastKept] = useState('');
   const [videoError, setVideoError] = useState(false);
-  const [ports, setPorts] = useState<{ port: string; description: string; serial?: string | null }[]>([]);
-  const [cameras, setCameras] = useState<{ index: number; name: string; device_id: string }[]>([]);
-  const [deviceWarnings, setDeviceWarnings] = useState<string[]>([]);
-  const [discovering, setDiscovering] = useState(false);
-  const [profile, setProfile] = useState('');
   const [countdown, setCountdown] = useState<number | null>(null);
-  const [form, setForm] = useState({
-    leader_port: '', follower_port: '', leader_id: '', follower_id: '',
-    calibration_dir: '', camera_index: '', mac_camera_index: '', width: '640', height: '480', camera_fps: '30',
-  });
-
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
@@ -67,31 +52,6 @@ export function Recorder() {
     void poll();
     return () => { active = false; clearTimeout(timer); };
   }, []);
-
-  async function discover() {
-    setDiscovering(true);
-    try {
-      const devices = await api('devices');
-      setPorts(devices.ports);
-      setCameras(devices.cameras);
-      setDeviceWarnings(devices.warnings);
-      setForm(previous => {
-        const next = { ...previous };
-        for (const key of Object.keys(next) as (keyof typeof next)[]) {
-          if (key in devices.settings) next[key] = String(devices.settings[key] ?? '');
-        }
-        return next;
-      });
-    } catch (failure) {
-      setDeviceWarnings([String(failure)]);
-    } finally {
-      setDiscovering(false);
-    }
-  }
-
-  useEffect(() => {
-    if (status && !status.connected && !status.demo) void discover();
-  }, [status?.connected, status?.demo]);
 
   const takeId = selected || status?.active_episode_id || '';
   const take = status?.pending.find(entry => entry.episode_id === takeId);
@@ -134,83 +94,11 @@ export function Recorder() {
     return () => clearTimeout(timer);
   }, [countdown, status?.connected, status?.phase]);
 
-  async function connect(event: FormEvent) {
-    event.preventDefault();
-    await action('connect', {
-      ...form, calibration_dir: form.calibration_dir || null,
-      leader_serial: ports.find(port => port.port === form.leader_port)?.serial ?? null,
-      follower_serial: ports.find(port => port.port === form.follower_port)?.serial ?? null,
-      camera_device_id: cameras.find(camera => camera.index === Number(form.camera_index))?.device_id ?? null,
-      mac_camera_device_id: cameras.find(camera => camera.index === Number(form.mac_camera_index))?.device_id ?? null,
-      mac_camera_index: form.mac_camera_index === '' ? null : Number(form.mac_camera_index),
-      camera_index: Number(form.camera_index),
-      width: Number(form.width || (status?.demo ? 320 : 0)),
-      height: Number(form.height || (status?.demo ? 240 : 0)), camera_fps: Number(form.camera_fps),
-    });
-  }
-
-  async function inspect() {
-    setBusy(true);
-    setError('');
-    try {
-      const next = await api('camera/inspect', { camera_index: Number(form.camera_index) });
-      setProfile(JSON.stringify(next.camera_profile, null, 2));
-    } catch (failure) {
-      setError(String(failure));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return <main>
     <h1>BC recorder</h1>
-    {status?.demo && <p role="status"><strong>Demo: synthetic devices. No physical robot or camera is connected.</strong></p>}
-    <p>Session: <strong>{status?.phase ?? 'Connecting to backend…'}</strong></p>
-    {(error || status?.error) && <p role="alert">{error || status?.error}</p>}
-
-    {!status?.connected && <form onSubmit={connect}>
-      <fieldset disabled={busy || discovering || !status}>
-        <legend>Connect session</legend>
-        <button type="button" onClick={() => void discover()}>{discovering ? 'Finding devices…' : 'Rediscover saved setup'}</button>
-        <p>Devices are detected automatically. Connect starts teleoperation.</p>
-        {deviceWarnings.map((warning, index) => <p role="status" key={index}>{warning}</p>)}
-        {ports.map(port => <p key={port.port}>{port.port} · {port.description}</p>)}
-        <datalist id="ports">{ports.map(port => <option key={port.port} value={port.port} />)}</datalist>
-        {(['leader_port', 'follower_port', 'leader_id', 'follower_id', 'calibration_dir'] as const).map(key =>
-          <label key={key}>{key.replaceAll('_', ' ')}
-            <input value={form[key]} list={key.endsWith('port') ? 'ports' : undefined}
-              required={!status?.demo && key !== 'calibration_dir'}
-              onChange={event => setForm({ ...form, [key]: event.target.value })} />
-          </label>,
-        )}
-        <p>Use the IDs you calibrated with LeRobot. Existing calibration is required.</p>
-        <label>Arm camera
-          <select aria-label="Camera" required={!status?.demo} value={form.camera_index}
-            onChange={event => setForm({ ...form, camera_index: event.target.value })}>
-            <option value="">Select a camera</option>
-            {cameras.map(camera => <option key={camera.device_id} value={camera.index}>{camera.name} · index {camera.index}</option>)}
-          </select>
-        </label>
-        <label>Mac camera
-          <select aria-label="Mac camera" required={!status?.demo} value={form.mac_camera_index}
-            onChange={event => setForm({ ...form, mac_camera_index: event.target.value })}>
-            <option value="">Select the Mac camera</option>
-            {cameras.filter(camera => String(camera.index) !== form.camera_index).map(camera =>
-              <option key={camera.device_id} value={camera.index}>{camera.name} · index {camera.index}</option>)}
-          </select>
-        </label>
-        {(['width', 'height', 'camera_fps'] as const).map(key =>
-          <label key={key}>{key === 'camera_fps' ? 'Camera images per second' : key.replaceAll('_', ' ')}
-            <input type="number" value={form[key]} min={1}
-              required={!status?.demo} onChange={event => setForm({ ...form, [key]: event.target.value })} />
-          </label>,
-        )}
-        <button type="button" onClick={() => void inspect()} disabled={status?.demo}>Inspect selected camera</button>
-        {profile && <pre>{profile}</pre>}
-        <p>Choose capture size after inspection. Model input remains 224 × 168.</p>
-        <button type="submit">{status?.demo ? 'Connect demo session' : 'Connect arms and camera'}</button>
-      </fieldset>
-    </form>}
+    <SessionStatus phase={status?.phase} demo={status?.demo} error={error || status?.error} />
+    {status && !status.connected && <ConnectionPanel demo={status.demo} busy={busy}
+      onConnect={settings => action('connect', settings)} />}
 
     {status?.connected && <section>
       <p>Follower follows the leader during recording, review, and reset.</p>
@@ -240,15 +128,10 @@ export function Recorder() {
       {take && take.status !== 'recording' && <>
         <p>{take.status} · {take.row_count ?? 0} observations</p>
         {take.error && <p role="alert">{take.error}</p>}
-        <h3>Arm camera</h3>
-        <video key={takeId} controls preload="metadata" src={`/api/episodes/${encodeURIComponent(takeId)}/video`}
+        <CameraPanel key={takeId} title="Arm camera" src={`/api/episodes/${encodeURIComponent(takeId)}/video`}
           onError={() => setVideoError(true)} />
-        {take.mac_camera && <>
-          <h3>Mac camera</h3>
-          <video key={`${takeId}-mac`} controls preload="metadata"
-            src={`/api/episodes/${encodeURIComponent(takeId)}/video?camera=mac`}
-            onError={() => setVideoError(true)} />
-        </>}
+        {take.mac_camera && <CameraPanel key={`${takeId}-mac`} title="Mac camera"
+          src={`/api/episodes/${encodeURIComponent(takeId)}/video?camera=mac`} onError={() => setVideoError(true)} />}
         {videoError && <p role="alert">Video could not be played. The pending files remain preserved.</p>}
         <p>Take missed deadlines: {take.diagnostics?.missed_deadlines ?? 'unavailable'} · Repeated camera frames: {take.diagnostics?.repeated_frames ?? 'unavailable'}</p>
         <label>Episode name (optional)

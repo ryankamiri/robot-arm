@@ -16,7 +16,7 @@ from models.policy import DapPolicy
 from training.bc.dataset import BCSample, create_dataloaders
 from training.bc.loss import expert_nll
 from training.shared.checkpoints import load_checkpoint, save_checkpoint
-from training.shared.config import load_config, save_config
+from shared.config import load_config, save_config
 from training.shared.episodes import discover_episodes
 from training.shared.metrics import log_metrics, start_run
 from training.shared.randomness import seed_training

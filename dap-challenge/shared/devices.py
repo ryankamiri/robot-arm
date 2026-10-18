@@ -13,10 +13,11 @@ import av
 from av.container import InputContainer
 from jaxtyping import UInt8
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
+from lerobot.motors.feetech import OperatingMode
 from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 import numpy as np
 
-from training.shared.normalization import JOINT_NAMES
+from shared.normalization import JOINT_NAMES
 
 
 @dataclass
@@ -149,7 +150,36 @@ class CameraCapture:
             raise TimeoutError('camera capture is blocked; restart the backend before reconnecting')
 
 
+class HoldingFollower(SO101Follower):
+    """Initialize position goals from measured raw positions before enabling torque."""
+
+    def configure(self) -> None:
+        if not self.is_calibrated:
+            raise ValueError('Follower calibration does not match; refusing torque enable.')
+
+        self.bus.disable_torque()
+        self.bus.configure_motors()
+        for motor in self.bus.motors:
+            self.bus.write('Operating_Mode', motor, OperatingMode.POSITION.value)
+            for register, value in (
+                ('P_Coefficient', self.config.position_p_coefficient),
+                ('I_Coefficient', self.config.position_i_coefficient),
+                ('D_Coefficient', self.config.position_d_coefficient),
+            ):
+                self.bus.write(register, motor, value)
+            if motor == 'gripper':
+                self.bus.write('Max_Torque_Limit', motor, 500)
+                self.bus.write('Protection_Current', motor, 250)
+                self.bus.write('Overload_Torque', motor, 25)
+        positions = self.bus.sync_read('Present_Position', normalize=False, num_retry=self.config.num_read_retries)
+        self.bus.sync_write('Goal_Position', positions, normalize=False)
+        self.bus.enable_torque()
+
+
 class SO101Devices:
+    requires_leader = True
+    follower_class = SO101Follower
+
     def __init__(self, settings: dict[str, Any]):
         self.settings = settings
         self.camera = None
@@ -163,13 +193,14 @@ class SO101Devices:
         common = {'use_degrees': False}
         if config.get('calibration_dir'):
             common['calibration_dir'] = Path(config['calibration_dir']).expanduser()
-        self.leader = SO101Leader(SO101LeaderConfig(port=config['leader_port'], id=config['leader_id'], **common))
-        self.follower = SO101Follower(SO101FollowerConfig(
+        if self.requires_leader:
+            self.leader = SO101Leader(SO101LeaderConfig(port=config['leader_port'], id=config['leader_id'], **common))
+        self.follower = self.follower_class(SO101FollowerConfig(
             port=config['follower_port'], id=config['follower_id'],
             disable_torque_on_disconnect=True, cameras={}, **common,
         ))
-        if not self.leader.calibration or not self.follower.calibration:
-            raise ValueError('Calibrate both arm IDs with LeRobot first; web connections never prompt for calibration.')
+        if not self.follower.calibration or (self.leader is not None and not self.leader.calibration):
+            raise ValueError('Calibrate required arm IDs first; web connections never prompt for calibration.')
 
         try:
             self.camera = CameraCapture(config.get('camera_name', config['camera_index']), config['width'], config['height'], config['camera_fps'],
@@ -181,9 +212,10 @@ class SO101Devices:
 
                 self.mac_camera = CameraCapture(config.get('mac_camera_name', config['mac_camera_index']), config['width'], config['height'], config['camera_fps'])
                 self.mac_camera.connect()
-            self.leader.connect(calibrate=False)
-            if not self.leader.is_calibrated:
-                raise ValueError('leader calibration does not match the connected motors')
+            if self.leader is not None:
+                self.leader.connect(calibrate=False)
+                if not self.leader.is_calibrated:
+                    raise ValueError('leader calibration does not match the connected motors')
 
             self.follower.connect(calibrate=False)
             if not self.follower.is_calibrated:
@@ -191,10 +223,10 @@ class SO101Devices:
 
             return {
                 'device_mode': 'physical', 'lerobot_version': version('lerobot'),
-                'leader': {'port': config['leader_port'], 'id': config['leader_id']},
+                'leader': ({'port': config['leader_port'], 'id': config['leader_id']} if self.leader else None),
                 'follower': {'port': config['follower_port'], 'id': config['follower_id']},
                 'calibration': {
-                    'leader': {name: asdict(value) for name, value in self.leader.calibration.items()},
+                    'leader': ({name: asdict(value) for name, value in self.leader.calibration.items()} if self.leader else None),
                     'follower': {name: asdict(value) for name, value in self.follower.calibration.items()},
                 },
                 'camera': {'index': config['camera_index'], 'name': config.get('camera_name'), 'width': self.camera.read().rgb.shape[1], 'height': self.camera.read().rgb.shape[0],
@@ -218,17 +250,24 @@ class SO101Devices:
     def observe(self) -> tuple[CameraFrame, list[float], float]:
         self.mac_frame = self.mac_camera.read() if self.mac_camera else None
         frame = self.camera.read()
-        observation = self.follower.get_observation()
-        positions = [float(observation[f'{name}.pos']) for name in JOINT_NAMES]
+        positions = self.read_positions()
         return frame, positions, time.monotonic()
+
+    def read_positions(self) -> list[float]:
+        observation = self.follower.get_observation()
+        return [float(observation[f'{name}.pos']) for name in JOINT_NAMES]
+
+    def send_target(self, targets: list[float]) -> list[float]:
+        requested = {f'{name}.pos': value for name, value in zip(JOINT_NAMES, targets, strict=True)}
+        sent = self.follower.send_action(requested)
+        return [float(sent[f'{name}.pos']) for name in JOINT_NAMES]
 
     def secondary_frame(self) -> CameraFrame | None:
         return self.mac_frame
 
     def command(self) -> list[float]:
         requested = self.leader.get_action()
-        sent = self.follower.send_action(requested)
-        return [float(sent[f'{name}.pos']) for name in JOINT_NAMES]
+        return self.send_target([float(requested[f'{name}.pos']) for name in JOINT_NAMES])
 
     def disconnect(self) -> None:
         errors = []
@@ -248,33 +287,11 @@ class SO101Devices:
             raise RuntimeError('Device cleanup failed: ' + '; '.join(errors))
 
 
-class DemoDevices:
-    """Explicit synthetic UI/test source; never opens a camera or a serial port."""
+class FollowerDevices(SO101Devices):
+    """Autonomous follower and two cameras; never opens or reads the leader."""
 
-    def connect(self) -> dict[str, Any]:
-        self.sequence = 0
-        self.positions = [0.0] * 5 + [50.0]
-        return {'device_mode': 'demo', 'calibration': {'source': 'synthetic; not hardware calibration'},
-                'camera': {'width': 320, 'height': 240, 'timestamp_basis': 'synthetic_host_monotonic'},
-                'action_timestamp_basis': 'synthetic_command_return'}
-
-    def observe(self) -> tuple[CameraFrame, list[float], float]:
-        self.sequence += 1
-        rgb: UInt8[np.ndarray, 'H_src W_src C_in'] = np.zeros((240, 320, 3), dtype=np.uint8)
-        rgb[:, :, 1] = 40
-        rgb[:, self.sequence % 280:self.sequence % 280 + 40, 0] = 200
-        timestamp = time.monotonic()
-        return CameraFrame(rgb, self.sequence, timestamp), self.positions.copy(), timestamp
-
-    def secondary_frame(self) -> CameraFrame | None:
-        return None
-
-    def command(self) -> list[float]:
-        self.positions[0] = float(20 * np.sin(self.sequence / 20))
-        return self.positions.copy()
-
-    def disconnect(self) -> None:
-        pass
+    requires_leader = False
+    follower_class = HoldingFollower
 
 
 def inspect_camera(index: int | str) -> dict[str, Any]:

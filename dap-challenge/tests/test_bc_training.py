@@ -24,8 +24,8 @@ from models.dimensions import A
 from models.policy import DapPolicy
 from training.bc.loss import expert_nll
 from training.bc.train import BatchMetrics, batch_metrics, evaluate, train
-from training.shared.config import load_config
-from training.shared.normalization import JOINT_NAMES, denormalize_controller
+from shared.config import load_config
+from shared.normalization import JOINT_NAMES, denormalize_controller
 
 
 class BCTrainingTests(unittest.TestCase):

@@ -5,7 +5,7 @@ from typing import Any, Literal, Mapping
 
 import wandb
 
-from .config import _plain_config
+from shared.config import _plain_config
 
 
 def start_run(

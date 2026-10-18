@@ -16,7 +16,7 @@ from training.shared.checkpoints import (
     load_checkpoint,
     save_checkpoint,
 )
-from training.shared.config import load_config, save_config
+from shared.config import load_config, save_config
 from training.shared.metrics import log_metrics, start_run
 from training.shared.randomness import capture_rng_state, restore_rng_state, seed_training
 

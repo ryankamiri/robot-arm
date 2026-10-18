@@ -1,0 +1,13 @@
+control:
+  iterations_per_second: 30
+  camera_stale_s: 0.25
+  consecutive_deadline_misses: 3
+  browser_timeout_s: 2.0
+  max_target_delta: 2.0
+  start_tolerance: 5.0
+  reset_speed_per_second: 15.0
+  reset_tolerance: 1.0
+  reset_timeout_s: 20.0
+policy:
+  device: mps
+  action_mode: mean

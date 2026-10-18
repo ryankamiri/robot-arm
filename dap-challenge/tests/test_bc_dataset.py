@@ -16,12 +16,12 @@ import torch
 from torch import Tensor
 
 from models.dimensions import A, C_RGB
-from training.shared.normalization import JOINT_NAMES, denormalize_controller
+from shared.normalization import JOINT_NAMES, denormalize_controller
 from models.policy import DapPolicy
 from training.bc.dataset import BCDataset, create_dataloaders
-from training.shared.config import load_config
+from shared.config import load_config
 from training.shared.episodes import discover_episodes, load_episode
-from training.shared.observations import preprocess_image
+from shared.observations import preprocess_image
 
 
 class BCDatasetTests(unittest.TestCase):

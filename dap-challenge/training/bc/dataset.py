@@ -13,7 +13,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
 from training.shared.episodes import Episode, load_episode
-from training.shared.observations import build_history
+from shared.observations import build_history
 
 
 class BCSample(TypedDict):

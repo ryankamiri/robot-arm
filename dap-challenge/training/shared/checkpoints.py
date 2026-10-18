@@ -10,7 +10,7 @@ import torch
 from torch import nn
 from torch.optim import Optimizer
 
-from .config import _plain_config
+from shared.config import _plain_config
 from .randomness import capture_rng_state, restore_rng_state
 
 

@@ -7,7 +7,8 @@ PyYAML
 wandb
 datasets
 pyarrow
-av
+av>=14,<18
+aiortc==1.15.0
 fastapi
 uvicorn
 pyserial

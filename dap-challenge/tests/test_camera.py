@@ -15,7 +15,7 @@ import av
 from jaxtyping import UInt8
 import numpy as np
 
-from training.shared.devices import CameraCapture, camera_frames, inspect_camera
+from shared.devices import CameraCapture, camera_frames, inspect_camera
 
 
 class CameraTests(unittest.TestCase):
@@ -49,7 +49,7 @@ class CameraTests(unittest.TestCase):
         empty = MagicMock()
         empty.__next__.side_effect = av.error.BlockingIOError(errno.EAGAIN, 'temporarily empty')
         capture.demux.return_value = empty
-        with patch('training.shared.devices.time.monotonic', side_effect=[0, 11]):
+        with patch('shared.devices.time.monotonic', side_effect=[0, 11]):
             with self.assertRaises(TimeoutError):
                 next(camera_frames(capture, Event()))
 
@@ -68,9 +68,9 @@ class CameraTests(unittest.TestCase):
             yield frame
             stop.set()
 
-        with patch('training.shared.devices.open_camera') as opened:
+        with patch('shared.devices.open_camera') as opened:
             opened.return_value.__enter__.return_value = capture
-            with patch('training.shared.devices.camera_frames', side_effect=frames):
+            with patch('shared.devices.camera_frames', side_effect=frames):
                 camera._capture()
             opened.return_value.__exit__.assert_called_once()
         result = camera.read()
@@ -85,9 +85,9 @@ class CameraTests(unittest.TestCase):
         camera = CameraCapture(0, 8, 6, 30, rotation_clockwise=90)
         rgb = np.arange(6 * 8 * 3, dtype=np.uint8).reshape(6, 8, 3)
         frame = av.VideoFrame.from_ndarray(rgb, format='rgb24')
-        with patch('training.shared.devices.open_camera') as opened:
+        with patch('shared.devices.open_camera') as opened:
             opened.return_value.__enter__.return_value = self.container()
-            with patch('training.shared.devices.camera_frames', return_value=iter([frame])):
+            with patch('shared.devices.camera_frames', return_value=iter([frame])):
                 camera._capture()
         np.testing.assert_array_equal(camera.read().rgb, np.rot90(rgb, k=-1))
         self.assertEqual(camera.read().rgb.shape, (8, 6, 3))
@@ -95,27 +95,27 @@ class CameraTests(unittest.TestCase):
 
     def test_named_capture_is_passed_to_avfoundation_without_index_conversion(self):
         camera = CameraCapture('MacBook Pro Camera', 8, 6, 30)
-        with patch('training.shared.devices.open_camera') as opened:
+        with patch('shared.devices.open_camera') as opened:
             opened.return_value.__enter__.return_value = self.container()
-            with patch('training.shared.devices.camera_frames', return_value=iter([self.frame()])):
+            with patch('shared.devices.camera_frames', return_value=iter([self.frame()])):
                 camera._capture()
         opened.assert_called_once_with('MacBook Pro Camera', 8, 6, 30)
         self.assertEqual(camera.read().rgb.shape, (6, 8, 3))
 
     def test_wrong_capture_dimensions_are_rejected_before_recording(self):
         camera = CameraCapture(0, 8, 6, 30)
-        with patch('training.shared.devices.open_camera') as opened:
+        with patch('shared.devices.open_camera') as opened:
             opened.return_value.__enter__.return_value = self.container()
-            with patch('training.shared.devices.camera_frames', return_value=iter([self.frame(16, 12)])):
+            with patch('shared.devices.camera_frames', return_value=iter([self.frame(16, 12)])):
                 camera._capture()
         with self.assertRaisesRegex(ConnectionError, 'different dimensions'):
             camera.read()
         self.assertTrue(camera.ready.is_set())
 
     def test_inspection_reports_actual_frame_dimensions(self):
-        with patch('training.shared.devices.open_camera') as opened:
+        with patch('shared.devices.open_camera') as opened:
             opened.return_value.__enter__.return_value = self.container()
-            with patch('training.shared.devices.camera_frames', return_value=iter([self.frame()])):
+            with patch('shared.devices.camera_frames', return_value=iter([self.frame()])):
                 profile = inspect_camera(0)
         self.assertEqual((profile['width'], profile['height']), (8, 6))
         self.assertEqual(profile['reported_frames_per_second'], 30)
@@ -126,9 +126,9 @@ class CameraTests(unittest.TestCase):
             with self.subTest(rate=rate):
                 capture = self.container()
                 capture.streams.video[0].average_rate = rate
-                with patch('training.shared.devices.open_camera') as opened:
+                with patch('shared.devices.open_camera') as opened:
                     opened.return_value.__enter__.return_value = capture
-                    with patch('training.shared.devices.camera_frames', return_value=iter([self.frame()])):
+                    with patch('shared.devices.camera_frames', return_value=iter([self.frame()])):
                         profile = inspect_camera(0)
                 self.assertIsNone(profile['reported_frames_per_second'])
                 json.dumps(profile, allow_nan=False)
