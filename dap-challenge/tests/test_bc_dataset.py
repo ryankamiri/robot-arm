@@ -139,7 +139,7 @@ class BCDatasetTests(unittest.TestCase):
     def test_padding_is_causal_and_target_stays_at_current_time(self):
         episode = load_episode(self.write_episode("episode_0"), 8, 6)
         L = 3
-        dataset = BCDataset([episode], L)
+        dataset = BCDataset([episode], L, .01, .1)
         for time_index, indices in enumerate(([0, 0, 0], [0, 0, 1], [0, 1, 2], [1, 2, 3])):
             sample = dataset[time_index]
             torch.testing.assert_close(sample["images"], torch.stack([view[indices] for view in episode.frames], dim=1))
@@ -149,17 +149,32 @@ class BCDatasetTests(unittest.TestCase):
     def test_windows_never_cross_episode_boundaries(self):
         first = load_episode(self.write_episode("episode_0"), 8, 6)
         second = load_episode(self.write_episode("episode_1"), 8, 6)
-        dataset = BCDataset([first, second], 3)
+        dataset = BCDataset([first, second], 3, .01, .1)
         sample = dataset[len(first)]
         self.assertEqual(sample["episode_id"], second.episode_id)
         self.assertEqual(sample["time_index"], 0)
         torch.testing.assert_close(sample["positions"], second.positions[[0, 0, 0]])
         torch.testing.assert_close(sample["images"], torch.stack([view[[0, 0, 0]] for view in second.frames], dim=1))
 
+    def test_activity_is_episode_local_and_keeps_every_target(self):
+        episodes = []
+        for index in range(2):
+            path = self.write_episode(f'constant_{index}')
+            self.rewrite_columns(path, positions=[[0.] * 5 + [50.]] * 4,
+                                 actions=[[float(index*20)] * 5 + [50.]] * 4)
+            episodes.append(load_episode(path,8,6))
+        dataset = BCDataset(episodes,3,.01,.1)
+        self.assertEqual(len(dataset),8)
+        self.assertFalse(any(dataset[index]['non_waiting'] for index in range(len(dataset))))
+        for index,episode in enumerate(episodes):
+            for time_index in range(len(episode)):
+                sample = dataset[index*4+time_index]
+                torch.testing.assert_close(sample['expert_action'],episode.actions[time_index])
+
     def test_repeated_and_skipped_video_frames_use_explicit_indices(self):
         path = self.write_episode("episode_0", T=3, frame_indices=[0, 0, 2])
         episode = load_episode(path, 8, 6)
-        sample = BCDataset([episode], 3)[2]
+        sample = BCDataset([episode], 3, .01, .1)[2]
         torch.testing.assert_close(sample["images"], torch.stack((episode.frames[0][[0, 0, 2]], episode.frames[1][[0, 1, 2]]), dim=1))
         self.assertGreater(sample["images"][2].mean().item(), sample["images"][1].mean().item())
         torch.testing.assert_close(sample["positions"], episode.positions)
@@ -195,7 +210,7 @@ class BCDatasetTests(unittest.TestCase):
         config = {
             "preprocessing": {"image_width": 8, "image_height": 6},
             "model": {"history_length": 3},
-            "training": {"batch_size": 3},
+            "training": {"batch_size": 3, "activity": {"motion_threshold": .01, "window_half_s": .1}},
             "dataset": {"validation_fraction": 0.2},
         }
         first = create_dataloaders(paths, config, seed=7)
@@ -240,6 +255,8 @@ class BCDatasetTests(unittest.TestCase):
         self.assertEqual(batch["images"].shape, (B, L, 2, C_RGB, H_in, W_in))
         self.assertEqual(batch["positions"].shape, (B, L, A))
         self.assertEqual(batch["expert_action"].shape, (B, A))
+        self.assertEqual(batch["non_waiting"].shape, (B,))
+        self.assertEqual(batch["non_waiting"].dtype, torch.bool)
         with torch.inference_mode():
             output = DapPolicy(L).eval()(batch["images"], batch["positions"])
         self.assertEqual(output.mean.shape, (B, A))
@@ -250,7 +267,7 @@ class BCDatasetTests(unittest.TestCase):
         config = {
             "preprocessing": {"image_width": 8, "image_height": 6},
             "model": {"history_length": 3},
-            "training": {"batch_size": 3},
+            "training": {"batch_size": 3, "activity": {"motion_threshold": .01, "window_half_s": .1}},
             "dataset": {"validation_fraction": 0.2},
         }
         with self.assertRaises(ValueError):

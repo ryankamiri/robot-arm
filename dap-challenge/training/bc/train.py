@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 from typing import Any, Mapping
 
-from jaxtyping import Float, UInt8
+from jaxtyping import Bool, Float, UInt8
 import torch
 from torch import Tensor
 from torch.optim import AdamW
@@ -14,7 +14,8 @@ from torch.utils.data import DataLoader
 
 from models.policy import DapPolicy
 from training.bc.dataset import BCSample, create_dataloaders
-from training.bc.loss import expert_nll
+from training.bc.loss import expert_nll, weighted_nll
+from training.shared.activity import activity_mae_metrics, activity_mae_totals
 from training.shared.checkpoints import load_checkpoint, save_checkpoint
 from shared.config import load_config, save_config
 from training.shared.episodes import discover_episodes
@@ -29,6 +30,7 @@ class BatchMetrics:
     nll: Float[Tensor, 'B']
     action_mae: Float[Tensor, 'B']
     mean_abs_z: Float[Tensor, 'B']
+    non_waiting: Bool[Tensor, 'B']
 
 
 def batch_metrics(
@@ -46,7 +48,7 @@ def batch_metrics(
         (pre_tanh_targets - parameters.mean.detach()).abs() / parameters.log_std.detach().exp()
     )
     mean_abs_z: Float[Tensor, 'B'] = standardized_errors.mean(dim=-1)
-    return BatchMetrics(nll, action_mae, mean_abs_z)
+    return BatchMetrics(nll, action_mae, mean_abs_z, batch['non_waiting'].to(device=device))
 
 
 def evaluate(
@@ -56,6 +58,7 @@ def evaluate(
     previous_mode = policy.training
     totals = {'nll': 0.0, 'action_mae': 0.0, 'mean_abs_z': 0.0}
     count = 0
+    activity_totals = {'waiting':(0.,0),'non_waiting':(0.,0)}
     policy.eval()
     try:
         with torch.inference_mode():
@@ -65,10 +68,14 @@ def evaluate(
                 totals['action_mae'] += metrics.action_mae.sum().item()
                 totals['mean_abs_z'] += metrics.mean_abs_z.sum().item()
                 count += metrics.nll.numel()
+                for name,(error_sum,group_count) in activity_mae_totals(metrics.action_mae,metrics.non_waiting).items():
+                    previous_sum,previous_count = activity_totals[name]
+                    activity_totals[name] = (previous_sum+error_sum,previous_count+group_count)
         if count == 0 or any(not math.isfinite(value) for value in totals.values()):
             raise ValueError('validation must contain samples and have finite metrics')
 
-        return {f'val/{key}': value / count for key, value in totals.items()}
+        return {**{f'val/{key}': value / count for key, value in totals.items()},
+                **activity_mae_metrics(activity_totals,'val')}
     finally:
         policy.train(previous_mode)
 
@@ -85,6 +92,16 @@ def validate_config(config: Mapping[str, Any]) -> None:
         value = training['optimizer'][key]
         if isinstance(value, bool) or not math.isfinite(value) or value < 0 or (key != 'weight_decay' and value == 0):
             raise ValueError(f'invalid optimizer setting: {key}')
+    for key in ('waiting_weight','non_waiting_weight'):
+        value = training['loss'][key]
+        if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or value<=0:
+            raise ValueError(f'{key} must be positive and finite')
+
+    for key in ('motion_threshold','window_half_s'):
+        value = training['activity'][key]
+        if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or value<=0:
+            raise ValueError(f'{key} must be positive and finite')
+
     epsilon = training['loss']['endpoint_epsilon']
     if isinstance(epsilon, bool) or not math.isfinite(epsilon) or not 0 < epsilon < 1:
         raise ValueError('endpoint_epsilon must lie strictly between zero and one')
@@ -171,7 +188,9 @@ def train(
             for batch in iterator:
                 optimizer.zero_grad(set_to_none=True)
                 batch_values = batch_metrics(policy, batch, target_device, epsilon)
-                loss: Float[Tensor, ''] = batch_values.nll.mean()
+                loss: Float[Tensor, ''] = weighted_nll(
+                    batch_values.nll,batch_values.non_waiting,settings['loss']['waiting_weight'],settings['loss']['non_waiting_weight'],
+                )
                 if not torch.isfinite(loss):
                     raise FloatingPointError('non-finite training loss; no update performed')
 
@@ -183,11 +202,15 @@ def train(
                 step += 1
                 next_batch += 1
                 metrics = {
-                    'train/nll': loss.item(),
+                    'train/nll': batch_values.nll.mean().item(),
+                    'train/weighted_nll': loss.item(),
                     'train/action_mae': batch_values.action_mae.mean().item(),
                     'train/mean_abs_z': batch_values.mean_abs_z.mean().item(),
                     'train/gradient_norm': gradient_norm.item(), 'train/epoch': epoch,
                 }
+                metrics.update(activity_mae_metrics(
+                    activity_mae_totals(batch_values.action_mae,batch_values.non_waiting),'train',
+                ))
                 if step % settings['evaluation']['every_steps'] == 0:
                     metrics.update(validation())
                 if step % settings['checkpoint']['every_steps'] == 0:

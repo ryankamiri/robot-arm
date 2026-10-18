@@ -7,13 +7,14 @@ from pathlib import Path
 import random
 from typing import Any, Mapping, Sequence, TypedDict
 
-from jaxtyping import Float
+from jaxtyping import Bool, Float
 import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
 from training.shared.episodes import Episode, load_episode
 from shared.observations import build_history
+from training.shared.activity import non_waiting_mask
 
 
 class BCSample(TypedDict):
@@ -22,6 +23,7 @@ class BCSample(TypedDict):
     images: Float[Tensor, "L I C_in H_in W_in"]
     positions: Float[Tensor, "L A"]
     expert_action: Float[Tensor, "A"]
+    non_waiting: bool
     episode_id: str
     time_index: int
 
@@ -29,7 +31,7 @@ class BCSample(TypedDict):
 class BCDataset(Dataset[BCSample]):
     """Map each time index to causal observation history and its sent target."""
 
-    def __init__(self, episodes: Sequence[Episode], history_length: int) -> None:
+    def __init__(self, episodes: Sequence[Episode], history_length: int, motion_threshold: float, window_half_s: float) -> None:
         if not episodes or any(len(episode) == 0 for episode in episodes):
             raise ValueError("BCDataset requires nonempty episodes")
         if isinstance(history_length, bool) or not isinstance(history_length, int) or history_length < 1:
@@ -45,6 +47,13 @@ class BCDataset(Dataset[BCSample]):
 
         self.episodes = tuple(episodes)
         self.history_length = history_length
+        self.activity: list[Bool[Tensor, "T"]] = []
+        for episode in episodes:
+            columns = episode.table.select_columns(['positions','actions','timestamp_s']).to_dict()
+            self.activity.append(non_waiting_mask(
+                torch.as_tensor(columns['positions'],dtype=torch.float64), torch.as_tensor(columns['actions'],dtype=torch.float64),
+                torch.as_tensor(columns['timestamp_s'],dtype=torch.float64), episode.metadata['joint_names'], motion_threshold, window_half_s,
+            ))
         self.ends = []
         total = 0
         for episode in episodes:
@@ -71,6 +80,7 @@ class BCDataset(Dataset[BCSample]):
             images=history.images,
             positions=history.positions,
             expert_action=episode.actions[time_index].clone(),
+            non_waiting=bool(self.activity[episode_index][time_index]),
             episode_id=episode.episode_id,
             time_index=time_index,
         )
@@ -127,8 +137,9 @@ def create_dataloaders(
     if any(episode.metadata["joint_names"] != all_episodes[0].metadata["joint_names"] for episode in all_episodes):
         raise ValueError("training and validation must use the same joint order")
 
-    train_dataset = BCDataset(train_episodes, settings["history_length"])
-    validation_dataset = BCDataset(validation_episodes, settings["history_length"])
+    activity = config["training"]["activity"]
+    train_dataset = BCDataset(train_episodes, settings["history_length"], **activity)
+    validation_dataset = BCDataset(validation_episodes, settings["history_length"], **activity)
     generator = torch.Generator().manual_seed(seed)
     validation_generator = torch.Generator().manual_seed(seed)
     return BCDataLoaders(

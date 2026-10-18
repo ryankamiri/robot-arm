@@ -22,8 +22,8 @@ from torch.utils.data import DataLoader
 from models.architecture import GaussianParameters
 from models.dimensions import A
 from models.policy import DapPolicy
-from training.bc.loss import expert_nll
-from training.bc.train import BatchMetrics, batch_metrics, evaluate, train
+from training.bc.loss import expert_nll, weighted_nll
+from training.bc.train import BatchMetrics, batch_metrics, evaluate, train, validate_config
 from shared.config import load_config
 from shared.normalization import JOINT_NAMES, denormalize_controller
 
@@ -41,27 +41,27 @@ class BCTrainingTests(unittest.TestCase):
         self.config['training']['evaluation']['every_steps'] = 2
         self.run = Mock(id='bc-test-run')
 
-    def episodes(self):
+    def episodes(self, length: int = 3):
         for number in range(3):
             path = self.root / 'data' / f'episode_{number}'
             path.mkdir(parents=True)
             with av.open(str(path / 'video.mp4'), 'w') as container:
                 stream = container.add_stream('mpeg4', rate=30)
                 stream.width, stream.height, stream.pix_fmt = 16, 12, 'yuv420p'
-                for index in range(3):
-                    pixels: UInt8[np.ndarray, 'H_src W_src C_in'] = np.full((12, 16, 3), index * 60, dtype=np.uint8)
+                for index in range(length):
+                    pixels: UInt8[np.ndarray, 'H_src W_src C_in'] = np.full((12, 16, 3), index * 60 % 256, dtype=np.uint8)
                     for packet in stream.encode(av.VideoFrame.from_ndarray(pixels, format='rgb24')):
                         container.mux(packet)
                 for packet in stream.encode():
                     container.mux(packet)
             shutil.copy2(path / 'video.mp4', path / 'mac_video.mp4')
-            actions = denormalize_controller(torch.tensor([[-1.] * A, [0.] * A, [1.] * A]), JOINT_NAMES)
-            positions = denormalize_controller(torch.zeros(3, A), JOINT_NAMES)
+            actions = denormalize_controller(torch.linspace(-1.,1.,length).unsqueeze(1).repeat(1,A), JOINT_NAMES)
+            positions = denormalize_controller(torch.zeros(length, A), JOINT_NAMES)
             pq.write_table(pa.table({
-                'time_index': [0, 1, 2], 'frame_index': [0, 1, 2],
-                'mac_frame_index': [0, 1, 2], 'mac_camera_timestamp_s': [0., 0.03, 0.06],
-                'camera_timestamp_s': [0., 0.03, 0.06], 'timestamp_s': [0.001, 0.031, 0.061],
-                'action_timestamp_s': [0.002, 0.032, 0.062],
+                'time_index': list(range(length)), 'frame_index': list(range(length)),
+                'mac_frame_index': list(range(length)), 'mac_camera_timestamp_s': [index*.03 for index in range(length)],
+                'camera_timestamp_s': [index*.03 for index in range(length)], 'timestamp_s': [index*.03+.001 for index in range(length)],
+                'action_timestamp_s': [index*.03+.002 for index in range(length)],
                 'positions': positions.tolist(), 'actions': actions.tolist(),
             }), path / 'steps.parquet')
             (path / 'metadata.json').write_text(json.dumps({
@@ -101,7 +101,7 @@ class BCTrainingTests(unittest.TestCase):
     def test_action_mae_uses_deterministic_bounded_actions_not_pre_tanh_mean(self):
         policy = Mock(return_value=GaussianParameters(torch.full((2, A), math.atanh(0.5)), torch.zeros(2, A)))
         batch = {'images': torch.zeros(2, 3, 2, 3, 6, 8), 'positions': torch.zeros(2, 3, A),
-                 'expert_action': torch.tensor([[0.] * A, [1.] * A])}
+                 'expert_action': torch.tensor([[0.] * A, [1.] * A]), 'non_waiting':torch.tensor([False,True])}
         values = batch_metrics(policy, batch, torch.device('cpu'), 1e-4)
         torch.testing.assert_close(values.action_mae, torch.full((2,), 0.5))
         policy.assert_called_once()
@@ -110,13 +110,17 @@ class BCTrainingTests(unittest.TestCase):
         policy = DapPolicy(3)
         loader = DataLoader([0, 1, 2], batch_size=2)
         with patch('training.bc.train.batch_metrics', side_effect=[
-            BatchMetrics(torch.tensor([1., 2.]), torch.tensor([0., 0.]), torch.tensor([1., 2.])),
-            BatchMetrics(torch.tensor([9.]), torch.tensor([0.9]), torch.tensor([9.])),
+            BatchMetrics(torch.tensor([1., 2.]), torch.tensor([0., 0.]), torch.tensor([1., 2.]), torch.tensor([False,True])),
+            BatchMetrics(torch.tensor([9.]), torch.tensor([0.9]), torch.tensor([9.]), torch.tensor([False])),
         ]):
             metrics = evaluate(policy, loader, torch.device('cpu'), 1e-4)
             self.assertEqual(metrics['val/nll'], 4.)
             self.assertAlmostEqual(metrics['val/action_mae'], 0.3, places=6)
             self.assertEqual(metrics['val/mean_abs_z'], 4.)
+            self.assertAlmostEqual(metrics['val/action_mae_waiting'], .45, places=6)
+            self.assertEqual(metrics['val/action_mae_non_waiting'], 0.)
+            self.assertEqual(metrics['val/waiting_count'], 2)
+            self.assertEqual(metrics['val/non_waiting_count'], 1)
         self.assertTrue(policy.training)
         with patch('training.bc.train.batch_metrics', side_effect=RuntimeError('failed')):
             with self.assertRaises(RuntimeError):
@@ -129,7 +133,7 @@ class BCTrainingTests(unittest.TestCase):
         policy = Mock(return_value=GaussianParameters(mean, log_std))
         targets: Float[Tensor, 'B A'] = torch.tensor([[math.tanh(1.)] * A, [math.tanh(-1.)] * A])
         batch = {'images': torch.zeros(2, 3, 2, 3, 6, 8), 'positions': torch.zeros(2, 3, A),
-                 'expert_action': targets}
+                 'expert_action': targets, 'non_waiting':torch.tensor([False,True])}
         metrics = batch_metrics(policy, batch, torch.device('cpu'), 1e-4)
         torch.testing.assert_close(metrics.mean_abs_z, torch.tensor([2., 0.5]))
         self.assertFalse(metrics.mean_abs_z.requires_grad)
@@ -137,6 +141,51 @@ class BCTrainingTests(unittest.TestCase):
         batch['expert_action'] = torch.tensor([[-1.] * A, [1.] * A])
         endpoint_metrics = batch_metrics(policy, batch, torch.device('cpu'), 1e-4)
         self.assertTrue(torch.isfinite(endpoint_metrics.mean_abs_z).all())
+
+    def test_weighted_loss_doubles_non_waiting_gradient_without_changing_labels(self):
+        nll = torch.tensor([-2., 4., 1.], requires_grad=True)
+        activity = torch.tensor([False, True, False])
+        original = nll.detach().clone()
+        loss = weighted_nll(nll,activity,1.,2.)
+        self.assertAlmostEqual(loss.item(),1.75)
+        loss.backward()
+        torch.testing.assert_close(nll.grad,torch.tensor([.25,.5,.25]))
+        torch.testing.assert_close(nll.detach(),original)
+        self.assertEqual(weighted_nll(nll,activity,1.,1.).item(),nll.mean().item())
+        for activity in (torch.zeros(3,dtype=torch.bool),torch.ones(3,dtype=torch.bool)):
+            torch.testing.assert_close(weighted_nll(nll,activity,1.,2.),nll.mean())
+
+    def test_invalid_activity_weights_fail_before_run_creation(self):
+        for value in (0.,-1.,float('inf'),float('nan'),True):
+            for key in ('waiting_weight','non_waiting_weight'):
+                invalid = copy.deepcopy(self.config)
+                invalid['training']['loss'][key] = value
+                with self.assertRaisesRegex(ValueError,key):
+                    validate_config(invalid)
+
+    def test_activity_metrics_reach_wandb_for_train_and_validation(self):
+        self.episodes(length=12)
+        for path in (self.root/'data').iterdir():
+            table = pq.read_table(path/'steps.parquet').to_pydict()
+            targets = torch.zeros(12,A)
+            targets[6:] = torch.linspace(0.,.6,6).unsqueeze(1).repeat(1,A)
+            table['actions'] = denormalize_controller(targets,JOINT_NAMES).tolist()
+            pq.write_table(pa.Table.from_pydict(table),path/'steps.parquet')
+        self.config['training']['max_epochs'] = 1
+        self.config['training']['batch_size'] = 32
+        with patch('training.bc.train.start_run',return_value=self.run):
+            train(self.config,self.root/'activity-run','cpu','test','disabled')
+        logged = [call.args[0] for call in self.run.log.call_args_list]
+        training = next(row for row in logged if 'train/nll' in row)
+        validation = next(row for row in logged if 'val/nll' in row)
+        self.assertIn('train/weighted_nll',training)
+        for prefix,row in (('train',training),('val',validation)):
+            for group in ('waiting','non_waiting'):
+                self.assertGreater(row[f'{prefix}/{group}_count'],0)
+                self.assertTrue(math.isfinite(row[f'{prefix}/action_mae_{group}']))
+        saved = torch.load(self.root/'activity-run/latest.pt',weights_only=True)
+        self.assertEqual(saved['config']['training']['loss']['waiting_weight'],1.)
+        self.assertEqual(saved['config']['training']['loss']['non_waiting_weight'],2.)
 
     def test_latest_and_best_keep_distinct_steps_and_rollout_ids(self):
         self.episodes()

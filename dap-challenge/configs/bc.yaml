@@ -21,8 +21,14 @@ training:
   checkpoint:
     every_steps: 1
 
+  activity:
+    motion_threshold: 0.01
+    window_half_s: 0.1
+
   loss:
     endpoint_epsilon: 0.0001
+    waiting_weight: 1.0
+    non_waiting_weight: 2.0
 
   optimizer:
     learning_rate: 0.0003
@@ -32,5 +38,5 @@ training:
 wandb:
   project: robot-arm
   entity: ryanamiri05-northeastern-university
-  name: dap-bc-calibration-diagnostics
+  name: dap-bc-waiting1-active2
   mode: online
