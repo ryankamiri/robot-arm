@@ -51,6 +51,10 @@ def train_owned(args: argparse.Namespace, config: dict, output: Path) -> None:
     if args.max_scored_episodes is not None and args.max_scored_episodes < 1:
         raise ValueError('max scored episodes must be positive')
 
+    warmup_only = getattr(args, 'warmup_only', False)
+    if warmup_only and not config['training']['warmup']['enabled']:
+        raise ValueError('warmup-only requires warmup.enabled=true')
+
     device = torch.device(args.device)
     if device.type == 'mps' and not torch.backends.mps.is_available():
         raise ValueError('MPS is not available on this Mac')
@@ -72,12 +76,14 @@ def train_owned(args: argparse.Namespace, config: dict, output: Path) -> None:
         run.save()
         last_progress = 0.
         draining = False
-        def owner_lost() -> bool:
+        def stop_requested() -> bool:
             owner_pid = getattr(args, 'owner_pid', None)
-            return owner_pid is not None and os.getppid() != owner_pid
+            stop_file = getattr(args, 'stop_file', None)
+            return ((owner_pid is not None and os.getppid() != owner_pid) or bool(stop_file and Path(stop_file).exists())
+                    or (warmup_only and learner.progress['warmup_updates'] >= config['training']['warmup']['critic_only_updates']))
 
         while not stopped.is_set():
-            if owner_lost():
+            if stop_requested():
                 stopped.set()
                 break
             run.check_publication()
@@ -85,7 +91,7 @@ def train_owned(args: argparse.Namespace, config: dict, output: Path) -> None:
             draining = bool(getattr(args, 'drain_file', None) and Path(args.drain_file).exists())
             updated = False
             while learner.ready and not stopped.is_set():
-                if owner_lost():
+                if stop_requested():
                     stopped.set()
                     break
                 previous = learner.progress['actor_updates']
@@ -99,7 +105,8 @@ def train_owned(args: argparse.Namespace, config: dict, output: Path) -> None:
                     last_progress = time.monotonic()
             save_json({'state': 'draining' if draining else 'waiting_for_scored_data', 'updated_at': time.time(), **learner.progress}, output / 'progress.json')
             if updated:
-                run.publish()
+                if not warmup_only:
+                    run.publish()
                 run.save()
             exhausted_attempts = args.max_scored_episodes is not None and len(learner.replay.records) >= args.max_scored_episodes
             if draining or exhausted_attempts or not args.watch:
@@ -112,6 +119,8 @@ def train_owned(args: argparse.Namespace, config: dict, output: Path) -> None:
             state = 'paused_before_startup_gate'
         if stopped.is_set():
             state = 'stopped'
+        if warmup_only and learner.progress['warmup_updates'] >= config['training']['warmup']['critic_only_updates']:
+            state = 'warmup_complete'
         save_json({'state': state, 'updated_at': time.time(), 'publication': run.publisher.snapshot() if run.publisher else None, **learner.progress}, output / 'status.json')
     except Exception as error:
         save_json({'state': 'failed', 'error': str(error), 'updated_at': time.time(), 'publication': run.publisher.snapshot() if run.publisher else None, **learner.progress}, output / 'status.json')
@@ -135,6 +144,8 @@ def main() -> None:
     parser.add_argument('--reward-version', required=True)
     parser.add_argument('--device', choices=('cpu', 'mps'), default='mps')
     parser.add_argument('--watch', action='store_true')
+    parser.add_argument('--warmup-only', action='store_true', help='Save and exit at the critic warmup boundary before any actor updates.')
+    parser.add_argument('--stop-file', help='Save and pause after the current optimizer round without draining replay credits.')
     parser.add_argument('--owner-pid', type=int, help='Save and stop if the session server exits unexpectedly.')
     parser.add_argument('--drain-file', help='Stop accepting a session after draining all available scored replay credits.')
     parser.add_argument('--max-scored-episodes', type=int)

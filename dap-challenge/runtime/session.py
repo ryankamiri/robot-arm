@@ -164,10 +164,11 @@ class RuntimeSession:
         self.motion_cancel.set()
         self.abort_attempt(str(error))
         message = str(error)
-        try:
-            self.hold_position()
-        except Exception as failure:
-            message += f'; HOLD UNCONFIRMED: {failure}'
+        if self.state['connected']:
+            try:
+                self.hold_position()
+            except Exception as failure:
+                message += f'; HOLD UNCONFIRMED: {failure}'
         self.update_state(phase='fault', error=message)
 
     def abort_attempt(self, reason: str) -> None:
@@ -186,12 +187,12 @@ class RuntimeSession:
         self.frames = None
         if self.runner is not None:
             self.runner.reset()
-        self.update_state(connected=False, phase='disconnected', hold_confirmed=False, positions=None)
+        self.update_state(connected=False, phase='disconnected', error=None, hold_confirmed=False, positions=None)
 
     def handle_command(self, command: str, payload: dict) -> None:
         if command == 'rl_reserve':
-            if self.rl_owner is not None or self.state['phase'] in ('running', 'resetting') or (self.client_id and self.client_id != payload['client_id']):
-                raise ValueError('Stop motion and end the existing RL session first.')
+            if self.state['phase'] in ('running', 'resetting') or (self.client_id and self.client_id != payload['client_id']):
+                raise ValueError('Stop motion and use the browser that owns the follower before loading a run.')
 
             self.adopt_policy(payload['runner'])
             self.rl_owner, self.rl_run = payload['client_id'], payload['run_id']
@@ -226,7 +227,13 @@ class RuntimeSession:
             return
         if command == 'connect':
             if self.devices is not None:
-                raise ValueError('Disconnect the current session first.')
+                if self.state['connected']:
+                    raise ValueError('Disconnect the current session first.')
+
+                try:
+                    self.disconnect()
+                except Exception as error:
+                    raise RuntimeError(f'Previous device cleanup is incomplete: {error}') from error
 
             if not payload.get('client_id'):
                 raise ValueError('A browser owner ID is required.')
@@ -396,7 +403,7 @@ class RuntimeSession:
                             if self.devices is not None and (command in ('stop','abort','disconnect','capture_pose','reset','rl_release') or not isinstance(error,ValueError)):
                                 self.handle_fault(error)
                             future.set_exception(error)
-                if self.devices is not None:
+                if self.devices is not None and self.state['connected']:
                     active = self.state['phase'] in ('running','resetting')
                     try:
                         self.tick(started, self.clock()-previous)

@@ -206,6 +206,32 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(self.session.snapshot()['hold_confirmed'])
         self.assertIn('HOLD UNCONFIRMED',self.session.snapshot()['error'])
 
+    def test_connect_recovers_stale_resources_after_failed_connection_cleanup(self):
+        self.devices.disconnect()
+        self.session.client_id = None
+        self.session.update_state(connected=False, phase='fault', error='previous camera failure')
+        self.session.handle_command('connect', {**self.owner, 'settings': {}})
+        self.assertTrue(self.session.snapshot()['connected'])
+        self.assertEqual(self.session.snapshot()['phase'], 'holding')
+        self.assertIsNone(self.session.snapshot()['error'])
+
+    def test_connect_reports_blocked_cleanup_without_opening_another_device(self):
+        self.devices.disconnect()
+        self.session.client_id = None
+        self.session.update_state(connected=False, phase='fault')
+        with patch.object(self.devices, 'disconnect', side_effect=TimeoutError('camera capture is blocked')), patch.object(self.session, 'factory') as factory:
+            with self.assertRaisesRegex(RuntimeError, 'Previous device cleanup is incomplete.*camera capture is blocked'):
+                self.session.handle_command('connect', {**self.owner, 'settings': {}})
+            factory.assert_not_called()
+        with patch.object(self.devices, 'send_target') as send:
+            self.session.handle_fault(RuntimeError('camera cleanup blocked'))
+            send.assert_not_called()
+        self.assertNotIn('HOLD UNCONFIRMED', self.session.snapshot()['error'])
+
+    def test_connect_still_rejects_a_real_connected_session(self):
+        with self.assertRaisesRegex(ValueError, 'Disconnect the current session first'):
+            self.session.handle_command('connect', {**self.owner, 'settings': {}})
+
     def test_cross_process_style_lease_excludes_another_session_and_survives_cleanup_failure(self):
         contender = HardwareLease(self.root/'hardware.lock')
         with self.assertRaises(ValueError):

@@ -17,10 +17,11 @@ tasks:
         weight: 0.10
         anchors: ['Jerky or uncontrolled', 'Recognizable but awkward', 'Smooth and controlled']
       tracking:
-        label: Followed my moving fist
+        label: Followed my head
         weight: 0.10
         optional: true
-        anchors: ['Did not follow or lost the fist', 'Followed intermittently', 'Consistently followed the offered movement']
+        gated: false
+        anchors: ['Did not follow my head or lost attention', 'Followed my head intermittently as I moved', 'Consistently oriented toward my head as I moved around']
   greeting:
     label: Saying hi
     gates: [response]
@@ -42,7 +43,8 @@ tasks:
         weight: 0.25
         anchors: ['Did not return', 'Returned partway', 'Returned near rest']
       tracking:
-        label: Followed my waving hand
+        label: Followed my head
         weight: 0.10
         optional: true
-        anchors: ['Did not follow or lost the hand', 'Followed intermittently', 'Consistently followed the waving hand']
+        gated: false
+        anchors: ['Did not follow my head or lost attention', 'Followed my head intermittently as I moved', 'Consistently oriented toward my head as I moved around']

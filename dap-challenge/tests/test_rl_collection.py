@@ -50,9 +50,25 @@ class RubricTests(unittest.TestCase):
         self.bump['tracking'] = 1
         self.assertAlmostEqual(score_answers(self.rubric, ['fist_bump'], ['fist_bump'], {'fist_bump': self.bump})['reward'], 1.)
         self.bump['contact'] = False
-        self.assertEqual(score_answers(self.rubric, ['fist_bump'], ['fist_bump'], {'fist_bump': self.bump})['reward'], 0)
-        self.assertAlmostEqual(score_answers(self.rubric, ['fist_bump', 'greeting'], ['fist_bump', 'greeting'], {'fist_bump': self.bump, 'greeting': self.hi})['reward'], .45)
+        self.assertEqual(score_answers(self.rubric, ['fist_bump'], ['fist_bump'], {'fist_bump': self.bump})['reward'], .1)
+        self.assertAlmostEqual(score_answers(self.rubric, ['fist_bump', 'greeting'], ['fist_bump', 'greeting'], {'fist_bump': self.bump, 'greeting': self.hi})['reward'], .5)
         self.assertAlmostEqual(score_answers(self.rubric, ['fist_bump', 'greeting'], ['greeting'], {'greeting': self.hi})['reward'], .9)
+
+    def test_face_bonus_is_independent_of_task_gates_for_both_behaviors(self):
+        for name, original in [('fist_bump', self.bump), ('greeting', self.hi)]:
+            task = self.rubric['tasks'][name]
+            answers = {**original, **{gate: False for gate in task['gates']}}
+            for tracking, expected in [(None, 0), (0, 0), (.5, .05), (1, .1)]:
+                answers['tracking'] = tracking
+                with self.subTest(task=name, tracking=tracking):
+                    result = score_answers(self.rubric, [name], [name], {name: answers})
+                    self.assertAlmostEqual(result['reward'], expected)
+
+    def test_shared_tracking_bonus_is_counted_once_with_two_failed_behaviors(self):
+        answers = {'fist_bump': {**self.bump, 'contact': False, 'tracking': 1},
+                   'greeting': {**self.hi, 'response': False, 'tracking': 1}}
+        result = score_answers(self.rubric, list(answers), list(answers), answers)
+        self.assertAlmostEqual(result['reward'], .1)
 
     def test_rejects_unknown_missing_nonfinite_and_unselected_answers(self):
         for selected, cued, answers in [([], [], {}), (['greeting'], ['fist_bump'], {'fist_bump': self.bump}),
@@ -221,17 +237,18 @@ class CollectionTests(unittest.TestCase):
 
 
 class SessionProcessTests(unittest.TestCase):
-    def test_synthetic_background_learner_drains_and_resumes_without_recollection(self):
+    def test_training_and_hardware_lifecycles_are_independent_and_resume_replay(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             runtime_config = load_config(PROJECT / 'configs/runtime.yaml')
             runtime_config['policy']['device'] = 'cpu'
             runtime_config['control']['consecutive_deadline_misses'] = 100
-            runtime_config['control']['browser_timeout_s'] = 60
+            runtime_config['control']['browser_timeout_s'] = 120
             runtime = RuntimeSession(runtime_config, root / 'pose.yaml', HardwareLease(root / 'lease'), lambda settings: DemoFollower())
             config = load_config(PROJECT / 'configs/sac.yaml')
             config['training']['publication']['enabled'] = False
             config['training']['batch_size'] = 1
+            config['training']['critic_updates_per_new_transition'] = 1000
             config['training']['warmup'].update(minimum_scored_episodes=1, minimum_transitions=1, critic_only_updates=2)
             config_path = save_config(config, root / 'sac.yaml')
             settings = {'session': {'max_scored_episodes': 50, 'device': 'cpu'}, 'learner': {'config': str(config_path)}, 'reward': {'config': str(PROJECT / 'configs/reward.yaml')}}
@@ -242,9 +259,10 @@ class SessionProcessTests(unittest.TestCase):
             output = PROJECT / 'runs' / name
             runtime.start()
             try:
-                state = session.start('owner', name, 'http://127.0.0.1:9999/api/inference/policy')
-                self.assertTrue(state['learner']['alive'])
-                wait_until(lambda: (output / 'learner/latest.pt').is_file(), 30)
+                state = session.load_run('owner', name, 'http://127.0.0.1:9999/api/inference/policy')
+                self.assertFalse(state['learner']['alive'])
+                self.assertIsNone(session.process)
+                self.assertFalse((output / 'learner/latest.pt').exists())
                 runtime.request('connect', {'client_id': 'owner', 'settings': {}})
                 runtime.request('capture_pose', {'client_id': 'owner'})
                 session.start_attempt('owner', ['greeting'])
@@ -252,21 +270,49 @@ class SessionProcessTests(unittest.TestCase):
                 session.stop_attempt('owner')
                 wait_until(lambda: any(item['status'] == 'review' for item in session.store.episodes()))
                 episode = session.store.episodes()[0]
-                session.score('owner', episode['episode_id'], ['greeting'], {'greeting': {'response': True, 'mouth': 1, 'up': 1, 'down': 1, 'tracking': None}}, '')
-                session.end('owner')
+                session.score('owner', episode['episode_id'], ['greeting'], {'greeting': {'response': False, 'mouth': 0, 'up': 0, 'down': 0, 'tracking': 1}}, '')
+                self.assertIsNone(session.process)
+                session.end_session('owner')
                 self.assertIsNone(runtime.devices)
+                state = session.start_training('owner')
+                self.assertTrue(state['learner']['alive'])
+                self.assertIsNone(runtime.devices)
+                wait_until(lambda: (output / 'learner/latest.pt').is_file(), 30)
+                with self.assertRaisesRegex(ValueError, 'already running'):
+                    session.start_training('owner')
+                with self.assertRaises(ValueError):
+                    session.stop_training('another-browser')
+                runtime.request('connect', {'client_id': 'owner', 'settings': {}})
+                session.end_session('owner')
+                self.assertIsNone(runtime.devices)
+                self.assertIsNone(session.process.poll())
+                runtime.request('connect', {'client_id': 'owner', 'settings': {}})
+                runtime.request('capture_pose', {'client_id': 'owner'})
+                session.start_attempt('owner', ['greeting'])
+                session.stop_training('owner')
+                self.assertEqual(runtime.snapshot()['phase'], 'running')
                 session.process.wait(timeout=90)
+                self.assertEqual(runtime.snapshot()['phase'], 'running')
+                self.assertIsNotNone(runtime.devices)
                 terminal = json.loads((output / 'status.json').read_text())
                 self.assertEqual(session.process.returncode, 0, (output / 'learner.log').read_text()[-3000:])
-                self.assertEqual(terminal['critic_updates'], terminal['earned_updates'])
-                self.assertGreater(terminal['critic_updates'], 0)
-                session.start('owner', name, 'http://127.0.0.1:9998/api/inference/policy')
+                self.assertEqual(terminal['state'], 'stopped')
+                self.assertLess(terminal['critic_updates'], terminal['earned_updates'])
+                session.stop_attempt('owner')
+                wait_until(lambda: any(item['status'] == 'review' for item in session.store.episodes()))
+                second = next(item for item in session.store.episodes() if item['status'] == 'review')
+                session.score('owner', second['episode_id'], ['greeting'], {'greeting': {'response': True, 'mouth': 1, 'up': 1, 'down': 1, 'tracking': None}}, '')
+                session.end_session('owner')
+                self.assertIsNone(runtime.devices)
+                session.start_training('owner')
                 wait_until(lambda: (output / 'progress.json').exists(), 30)
-                session.end('owner')
-                session.process.wait(timeout=60)
+                session.stop_training('owner')
+                session.process.wait(timeout=90)
                 resumed = json.loads((output / 'status.json').read_text())
-                self.assertEqual(resumed['critic_updates'], terminal['critic_updates'])
-                self.assertEqual(resumed['earned_updates'], terminal['earned_updates'])
+                self.assertEqual(session.process.returncode, 0, (output / 'learner.log').read_text()[-3000:])
+                self.assertGreaterEqual(resumed['critic_updates'], terminal['critic_updates'])
+                self.assertEqual(resumed['earned_updates'], 1000 * (episode['transitions'] + second['transitions']))
+                self.assertIsNone(runtime.devices)
             finally:
                 session.close()
                 runtime.close()

@@ -1,4 +1,4 @@
-"""Coordinate persisted human-scored sessions with the existing runtime and a separate SAC process."""
+"""Manage persisted RL runs independently from the arm connection and SAC learner process."""
 
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -38,7 +38,7 @@ class RLSession:
 
     def require_owner(self, owner: str) -> None:
         if not self.run_id or self.owner != owner:
-            raise ValueError('Start or resume an RL session in this browser first.')
+            raise ValueError('Load an RL run in this browser first.')
 
     def alive(self, output: Path) -> bool:
         receipt = output / 'launch.json'
@@ -49,10 +49,15 @@ class RLSession:
         result = subprocess.run(['ps', '-p', str(pid), '-o', 'command='], capture_output=True, text=True)
         return result.returncode == 0 and 'training.sac.train' in result.stdout and str(output) in result.stdout
 
-    def start(self, owner: str, run_id: str, publication_url: str) -> dict:
+    def load_run(self, owner: str, run_id: str, publication_url: str) -> dict:
         with self.lock:
-            if self.run_id is not None or (self.process is not None and self.process.poll() is None):
-                raise ValueError('End the current session and wait for its learner to finish draining.')
+            if self.process is not None:
+                self.process.poll()
+            if self.output is not None and self.alive(self.output):
+                raise ValueError('Stop training before loading another run.')
+
+            if self.runtime.collector is not None or (self.runtime.last_collector and self.runtime.last_collector.thread.is_alive()):
+                raise ValueError('End the rollout and wait for its recording to finish before switching runs.')
 
             run_id = safe_identifier(run_id)
             if self.demo and not run_id.startswith('demo-'):
@@ -75,8 +80,6 @@ class RLSession:
                 rubric = manifest['rubric']
                 if (output / 'learner/latest.pt').exists():
                     config['initialization']['resume_checkpoint'] = str(output / 'learner/latest.pt')
-                elif any((directory / 'scored').glob('*.pt')):
-                    raise ValueError('Existing scored replay has no learner checkpoint. Inspect the failed launch before resuming.')
             else:
                 if output.exists():
                     raise ValueError('Choose a fresh RL run name; its checkpoint directory already exists.')
@@ -105,33 +108,55 @@ class RLSession:
             snapshot = encode_actor(actor, config['preprocessing'], run_id, step)
             runner = PolicyRunner.from_snapshot(snapshot.content)
             store = RolloutStore(directory, rubric)
-            if len(list((directory / 'scored').glob('*.pt'))) >= manifest['maximum']:
-                raise ValueError('This run has reached its scored-attempt budget. Start another run instead.')
 
             self.runtime.request('rl_reserve', {'client_id': owner, 'run_id': run_id, 'runner': runner, 'store': store})
             self.run_id, self.owner, self.output, self.store = run_id, owner, output, store
+            self.process = None
+            manifest['learner_config'] = config
+            save_json(manifest, manifest_path)
+            save_config(config, output / 'session-config.yaml')
+            save_config(rubric, output / 'reward.yaml')
+            return self.status(owner)
+
+    def start_training(self, owner: str) -> dict:
+        with self.lock:
+            self.require_owner(owner)
+            if self.alive(self.output):
+                raise ValueError('Training is already running for this run.')
+
+            manifest_path = self.store.root / 'session.json'
+            manifest = json.loads(manifest_path.read_text())
+            config = deepcopy(manifest['learner_config'])
+            checkpoint = self.output / 'learner/latest.pt'
+            if checkpoint.exists():
+                config['initialization']['resume_checkpoint'] = str(checkpoint)
+            validate_config(config)
+            manifest['learner_config'] = config
+            save_json(manifest, manifest_path)
+            save_config(config, self.output / 'session-config.yaml')
+            for name in ('drain.request', 'stop.request', 'status.json', 'progress.json'):
+                (self.output / name).unlink(missing_ok=True)
+            command = [sys.executable, '-m', 'training.sac.train', '--config', str(self.output / 'session-config.yaml'),
+                       '--output', str(self.output), '--episodes', str(self.store.root / 'scored'),
+                       '--reward-version', self.store.rubric['version'],
+                       '--device', 'cpu' if self.demo else self.settings['session']['device'], '--watch',
+                       '--max-scored-episodes', str(manifest['maximum']), '--owner-pid', str(os.getpid()),
+                       '--stop-file', str(self.output / 'stop.request')]
+            environment = {**os.environ, 'PYTHONPATH': str(self.project), 'PYTHONUNBUFFERED': '1'}
             try:
-                manifest['learner_config'] = config
-                save_json(manifest, manifest_path)
-                save_config(config, output / 'session-config.yaml')
-                save_config(rubric, output / 'reward.yaml')
-                drain_file = output / 'drain.request'
-                drain_file.unlink(missing_ok=True)
-                (output / 'status.json').unlink(missing_ok=True)
-                (output / 'progress.json').unlink(missing_ok=True)
-                command = [sys.executable, '-m', 'training.sac.train', '--config', str(output / 'session-config.yaml'),
-                           '--output', str(output), '--episodes', str(directory / 'scored'), '--reward-version', rubric['version'],
-                           '--device', 'cpu' if self.demo else self.settings['session']['device'], '--watch',
-                           '--max-scored-episodes', str(manifest['maximum']), '--drain-file', str(drain_file), '--owner-pid', str(os.getpid())]
-                environment = {**os.environ, 'PYTHONPATH': str(self.project), 'PYTHONUNBUFFERED': '1'}
-                with (output / 'learner.log').open('a') as log:
+                with (self.output / 'learner.log').open('a') as log:
                     self.process = subprocess.Popen(command, cwd=self.project.parent, env=environment, stdout=log, stderr=subprocess.STDOUT)
-                save_json({'pid': self.process.pid, 'command': command, 'demo': self.demo}, output / 'launch.json')
+                save_json({'pid': self.process.pid, 'command': command, 'demo': self.demo}, self.output / 'launch.json')
             except Exception as error:
-                save_json({'state': 'failed', 'error': str(error)}, output / 'status.json')
-                self.runtime.request('rl_release', {'client_id': owner})
-                self.run_id = self.owner = None
+                save_json({'state': 'failed', 'error': str(error)}, self.output / 'status.json')
                 raise
+            return self.status(owner)
+
+    def stop_training(self, owner: str) -> dict:
+        with self.lock:
+            self.require_owner(owner)
+            if self.alive(self.output):
+                (self.output / 'stop.request').touch()
             return self.status(owner)
 
     def status(self, owner: str) -> dict:
@@ -150,7 +175,9 @@ class RLSession:
                         learner.update(state='failed', error=(output / 'learner.log').read_text()[-4000:])
                 elif alive and learner['state'] == 'not_started':
                     learner['state'] = 'starting'
-                if (output / 'drain.request').exists() and alive:
+                if (output / 'stop.request').exists() and alive:
+                    learner['state'] = 'stopping'
+                elif (output / 'drain.request').exists() and alive:
                     learner['state'] = 'draining'
             mine = self.owner == owner
             return {'run_id': self.run_id, 'last_run_id': output.name if output else None, 'owned_by_you': mine, 'demo': self.demo, 'runs': self.catalog(),
@@ -163,9 +190,6 @@ class RLSession:
         with self.lock:
             self.require_owner(owner)
             state = self.status(owner)
-            if not state['learner']['alive'] or state['learner']['state'] in ('failed', 'draining'):
-                raise ValueError('The session learner is not running. Inspect its status before collecting more data.')
-
             if sum(episode['status'] == 'scored' for episode in state['episodes']) >= state['maximum']:
                 raise ValueError('This run has reached its scored-attempt budget.')
 
@@ -201,19 +225,16 @@ class RLSession:
             path.rename(self.store.root / 'aborted' / path.name)
             return self.status(owner)
 
-    def end(self, owner: str) -> dict:
+    def end_session(self, owner: str) -> dict:
         with self.lock:
             self.require_owner(owner)
-            try:
-                self.runtime.request('rl_release', {'client_id': owner})
-            finally:
-                (self.output / 'drain.request').touch()
-            self.run_id = self.owner = None
+            if self.runtime.devices is not None:
+                self.runtime.request('disconnect', {'client_id': owner})
             return self.status(owner)
 
     def close(self) -> None:
         if self.run_id is not None:
-            self.end(self.owner)
+            self.runtime.request('rl_release', {'client_id': self.owner})
         writer = self.runtime.last_collector
         if writer is not None:
             writer.thread.join(timeout=15)

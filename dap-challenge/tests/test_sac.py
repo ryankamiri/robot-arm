@@ -326,6 +326,37 @@ class SACEntrypointTests(unittest.TestCase):
                     with training_directory(Path(directory)):
                         self.fail('second owner acquired the same run')
 
+    def test_warmup_only_stops_at_boundary_without_changing_actor(self):
+        runs = CONFIG.parents[1] / 'runs'
+        with TemporaryDirectory(dir=runs) as directory:
+            root = Path(directory)
+            config = small_config()
+            config['wandb']['mode'] = 'disabled'
+            source = SACLearner(DapPolicy(3), config, 'rubric-v1')
+            actor_before = deepcopy(source.actor.state_dict())
+            source_path = LearnerRun(source, root / 'source').export_actor()
+            config['initialization'].update(actor_checkpoint=str(source_path), critic_checkpoint=str(source_path))
+            config_path = save_config(config, root / 'recipe.yaml')
+            inbox = root / 'episodes'
+            episode().save(inbox)
+            args = argparse.Namespace(config=str(config_path), output=str(root / 'output'), episodes=str(inbox),
+                                      reward_version='rubric-v1', device='cpu', watch=True, max_scored_episodes=5, warmup_only=True)
+            with patch('training.sac.train.start_run', return_value=Mock(id='synthetic-run')):
+                train(args)
+            checkpoint = root / 'output/learner/latest.pt'
+            state = torch.load(checkpoint, weights_only=True)
+            self.assertEqual(state['progress']['critic_updates'], 2)
+            self.assertEqual(state['progress']['warmup_updates'], 2)
+            self.assertEqual(state['progress']['actor_updates'], 0)
+            self.assertEqual(state['progress']['earned_updates'], 6)
+            for key, tensor in actor_before.items():
+                self.assertTrue(torch.equal(tensor, state['models']['actor'][key]))
+            config['initialization']['resume_checkpoint'] = str(checkpoint)
+            save_config(config, config_path)
+            with patch('training.sac.train.start_run', return_value=Mock(id='synthetic-run')):
+                train(args)
+            self.assertEqual(torch.load(checkpoint, weights_only=True)['progress']['critic_updates'], 2)
+
     def test_ingest_train_publish_and_resume_without_double_credits(self):
         runs = CONFIG.parents[1] / 'runs'
         runs.mkdir(exist_ok=True)

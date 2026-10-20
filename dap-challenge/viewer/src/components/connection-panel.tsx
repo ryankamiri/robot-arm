@@ -1,9 +1,9 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { api } from '../api';
 
-type Props = { demo: boolean; busy: boolean; inference?: boolean; onConnect: (settings: Record<string, unknown>) => Promise<void> };
+type Props = { demo: boolean; busy: boolean; inference?: boolean; connectLabel?: string; onConnect: (settings: Record<string, unknown>) => Promise<void> };
 
-export function ConnectionPanel({ demo, busy, inference = false, onConnect }: Props) {
+export function ConnectionPanel({ demo, busy, inference = false, connectLabel, onConnect }: Props) {
   const [ports, setPorts] = useState<{ port: string; description: string; serial?: string | null }[]>([]);
   const [cameras, setCameras] = useState<{ index: number; name: string; device_id: string }[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -82,7 +82,7 @@ export function ConnectionPanel({ demo, busy, inference = false, onConnect }: Pr
       {!inference && <button type="button" disabled={demo} onClick={() => void inspect()}>Inspect selected camera</button>}
       {profile && <pre>{profile}</pre>}
       <p>Model input: two views at 224 × 168. {inference && 'Capture: 640 × 480, 30 images per second.'}</p>
-      <button type="submit">{demo ? 'Connect demo session' : inference ? 'Connect follower and cameras' : 'Connect arms and camera'}</button>
+      <button type="submit">{connectLabel ?? (demo ? 'Connect demo session' : inference ? 'Connect follower and cameras' : 'Connect arms and camera')}</button>
     </fieldset>
   </form>;
 }

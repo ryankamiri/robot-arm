@@ -10,7 +10,7 @@ from runtime.api import Owner
 from runtime.rl_session import RLSession
 
 
-class SessionStart(Owner):
+class RunSelection(Owner):
     run_id: str = Field(min_length=1, max_length=100)
 
 
@@ -44,14 +44,22 @@ def rl_router(session: RLSession) -> APIRouter:
     def status(client_id: str = ''):
         return execute(session.status, client_id)
 
-    @router.post('/session/start')
-    def start(body: SessionStart, request: Request):
+    @router.post('/run/load')
+    def load_run(body: RunSelection, request: Request):
         url = str(request.base_url).rstrip('/') + '/api/inference/policy'
-        return execute(session.start, body.client_id, body.run_id, url)
+        return execute(session.load_run, body.client_id, body.run_id, url)
+
+    @router.post('/training/start')
+    def start_training(owner: Owner):
+        return execute(session.start_training, owner.client_id)
+
+    @router.post('/training/stop')
+    def stop_training(owner: Owner):
+        return execute(session.stop_training, owner.client_id)
 
     @router.post('/session/end')
     def end(owner: Owner):
-        return execute(session.end, owner.client_id)
+        return execute(session.end_session, owner.client_id)
 
     @router.post('/attempt/start')
     def start_attempt(body: AttemptStart):

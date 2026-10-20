@@ -19,12 +19,18 @@ def load_rubric(path: Path) -> dict:
         if any(type(item['weight']) not in (int, float) or not math.isfinite(item['weight']) or not 0 <= item['weight'] <= 1 for item in task['criteria'].values()):
             raise ValueError('Rubric weights must be finite values in [0,1].')
 
+        if any(type(item.get('gated', True)) is not bool for item in task['criteria'].values()):
+            raise ValueError('Criterion gated settings must be boolean.')
+
         gates = task['gates']
         if not isinstance(gates, list) or not gates or any(not isinstance(gate, str) or gate not in task['criteria'] for gate in gates):
             raise ValueError('Each task needs a nonempty list of named gate criteria.')
 
         if len(set(gates)) != len(gates):
             raise ValueError('Task gates must be unique.')
+
+        if any(not task['criteria'][gate].get('gated', True) for gate in gates):
+            raise ValueError('Gate criteria cannot bypass their task gates.')
 
         if any(task['criteria'][gate].get('optional') for gate in gates):
             raise ValueError('A task gate cannot be optional.')
@@ -58,5 +64,7 @@ def score_answers(rubric: dict, selected: list[str], cued: list[str], answers: d
             if not valid:
                 raise ValueError(f'Invalid answer for {name}/{key}.')
 
-        scores[name] = sum(criterion['weight'] * (values[key] or 0) for key, criterion in task['criteria'].items()) if all(values[gate] for gate in task['gates']) else 0.
+        gates_passed = all(values[gate] for gate in task['gates'])
+        scores[name] = sum(criterion['weight'] * (values[key] or 0) for key, criterion in task['criteria'].items()
+                           if gates_passed or not criterion.get('gated', True))
     return {'reward': sum(scores.values()) / len(scores), 'task_scores': scores, 'reward_version': rubric['version']}

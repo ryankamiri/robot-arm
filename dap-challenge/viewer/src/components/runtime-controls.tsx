@@ -58,8 +58,8 @@ export function useRuntime(leavePath = 'inference/stop') {
   return { clientId, status, error, setError, busy, owned, moving, action };
 }
 
-export function RuntimeControls({ status, owned, busy, moving, action, children, collecting = false }: {
-  status: RuntimeStatus; owned: boolean; busy: boolean; moving: boolean; collecting?: boolean;
+export function RuntimeControls({ status, owned, busy, moving, action, children, collecting = false, showDisconnect = true }: {
+  status: RuntimeStatus; owned: boolean; busy: boolean; moving: boolean; collecting?: boolean; showDisconnect?: boolean;
   action: (path: string, body?: Record<string, unknown>) => Promise<void>; children?: React.ReactNode;
 }) {
   return <section>
@@ -70,13 +70,15 @@ export function RuntimeControls({ status, owned, busy, moving, action, children,
       {children}
       <button disabled={busy || !owned || moving} onClick={() => void action('pose/capture')}>Capture starting pose</button>
       <button disabled={busy || !owned || collecting || status.phase === 'resetting' || !status.starting_pose} onClick={() => void action('pose/return')}>{status.phase === 'resetting' ? 'Returning to start…' : 'Return to start'}</button>
-      <button disabled={!owned} onClick={() => void action('disconnect')}>Disconnect / release motors</button>
+      {showDisconnect && <button disabled={!owned} onClick={() => void action('disconnect')}>Disconnect / release motors</button>}
     </div>
     <p>{moving ? 'Runtime is sending position targets.' : status.hold_confirmed ? 'Hold command sent.' : 'Hold command not confirmed.'} Support the follower before Disconnect.</p>
+    <details><summary>Positions and timing</summary>
     <p>Starting pose: {status.starting_pose?.positions.map(value => value.toFixed(2)).join(', ') ?? 'Not captured'}</p>
     <p>Current positions: {status.positions?.map(value => value.toFixed(2)).join(', ') ?? 'Unavailable'}</p>
     <p>Requested target: {status.requested_target?.map(value => value.toFixed(2)).join(', ') ?? 'None'}</p>
     <p>Sent target: {status.sent_target?.map(value => value.toFixed(2)).join(', ') ?? 'None'}</p>
     <p>Latest cycle: {status.diagnostics.cycle_ms.toFixed(1)} ms | Prediction: {status.diagnostics.prediction_ms.toFixed(1)} ms | Missed deadlines: {status.diagnostics.missed_deadlines} | Limited commands: {status.diagnostics.limited_commands}</p>
+    </details>
   </section>;
 }
