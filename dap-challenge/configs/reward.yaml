@@ -1,0 +1,48 @@
+name: dap-v1
+tasks:
+  fist_bump:
+    label: Fist bump
+    gates: [contact]
+    criteria:
+      contact:
+        label: Intentionally touched my presented fist
+        weight: 0.55
+        anchors: ['No intentional contact', 'Intentional contact']
+      retract:
+        label: Retracted its hand
+        weight: 0.25
+        anchors: ['No retraction', 'Pulled away but did not return near rest', 'Clearly retracted toward rest']
+      clean:
+        label: Clean and controlled
+        weight: 0.10
+        anchors: ['Jerky or uncontrolled', 'Recognizable but awkward', 'Smooth and controlled']
+      tracking:
+        label: Followed my moving fist
+        weight: 0.10
+        optional: true
+        anchors: ['Did not follow or lost the fist', 'Followed intermittently', 'Consistently followed the offered movement']
+  greeting:
+    label: Saying hi
+    gates: [response]
+    criteria:
+      response:
+        label: Intentionally responded to my wave
+        weight: 0.10
+        anchors: ['No greeting response; random movement does not count', 'Intentional greeting response']
+      mouth:
+        label: Opened the gripper
+        weight: 0.20
+        anchors: ['Did not open', 'Opened partially', 'Opened clearly for the greeting']
+      up:
+        label: Reached the demonstrated greeting pose
+        weight: 0.35
+        anchors: ['Did not rise', 'Rose partway', 'Reached demonstrated height, not a mechanical limit']
+      down:
+        label: Returned to resting pose
+        weight: 0.25
+        anchors: ['Did not return', 'Returned partway', 'Returned near rest']
+      tracking:
+        label: Followed my waving hand
+        weight: 0.10
+        optional: true
+        anchors: ['Did not follow or lost the hand', 'Followed intermittently', 'Consistently followed the waving hand']

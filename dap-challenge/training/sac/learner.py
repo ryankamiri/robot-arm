@@ -184,6 +184,11 @@ class SACLearner:
         payload = torch.load(path, weights_only=True, map_location='cpu')
         saved_recipe = {key: value for key, value in payload['config'].items() if key != 'initialization'}
         current_recipe = {key: value for key, value in self.config.items() if key != 'initialization'}
+        saved_recipe = deepcopy(saved_recipe)
+        current_recipe = deepcopy(current_recipe)
+        # A local HTTP port may change on restart without changing the learning recipe.
+        saved_recipe['training']['publication'].pop('url', None)
+        current_recipe['training']['publication'].pop('url', None)
         if saved_recipe != current_recipe or payload['extra_state']['reward_version'] != self.reward_version:
             raise ValueError('resume requires identical config and reward definition')
 

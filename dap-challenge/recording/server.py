@@ -19,6 +19,8 @@ from shared.devices import SO101Devices
 from shared.demo_devices import DemoDevices, DemoFollower
 from shared.config import load_config
 from runtime.api import inference_router
+from runtime.rl_api import rl_router
+from runtime.rl_session import RLSession
 from runtime.session import RuntimeSession
 from runtime.streaming import CameraPeers
 from shared.devices import FollowerDevices
@@ -65,7 +67,7 @@ class EpisodeKeep(EpisodeSelection):
 
 
 def create_app(session: RecorderSession | None = None, demo: bool = False, profile_path: Path | None = None,
-               runtime: RuntimeSession | None = None) -> FastAPI:
+               runtime: RuntimeSession | None = None, rl: RLSession | None = None) -> FastAPI:
     if profile_path is None:
         profile_path = PROJECT / 'local' / 'connection.json'
 
@@ -80,6 +82,8 @@ def create_app(session: RecorderSession | None = None, demo: bool = False, profi
         runtime = RuntimeSession(load_config(PROJECT / 'configs/runtime.yaml'), profile_path.parent / pose_name,
                                  session.lease, (lambda settings: DemoFollower()) if demo else FollowerDevices)
 
+    if rl is None:
+        rl = RLSession(runtime, PROJECT, demo)
     media = CameraPeers(runtime.preview_frame, runtime.preview_identity)
 
     @asynccontextmanager
@@ -93,12 +97,16 @@ def create_app(session: RecorderSession | None = None, demo: bool = False, profi
                 await media.close()
             finally:
                 try:
-                    runtime.close()
+                    try:
+                        rl.close()
+                    finally:
+                        runtime.close()
                 finally:
                     session.close()
 
     app = FastAPI(lifespan=lifespan)
     app.include_router(inference_router(runtime, PROJECT / 'runs', demo, media))
+    app.include_router(rl_router(rl))
 
     @app.middleware('http')
     async def local_commands_only(request: Request, call_next):
@@ -208,6 +216,7 @@ def create_app(session: RecorderSession | None = None, demo: bool = False, profi
     if dist.is_dir():
         app.mount('/assets', StaticFiles(directory=dist / 'assets'), name='assets')
 
+        @app.get('/record/rl')
         @app.get('/record/bc')
         @app.get('/inference')
         @app.get('/')

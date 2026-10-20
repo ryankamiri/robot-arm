@@ -1,0 +1,7 @@
+session:
+  max_scored_episodes: 50
+  device: mps
+learner:
+  config: dap-challenge/configs/sac.yaml
+reward:
+  config: dap-challenge/configs/reward.yaml

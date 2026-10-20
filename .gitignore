@@ -8,3 +8,4 @@ node_modules/
 /dap-challenge/viewer/dist/
 /dap-challenge/runs/
 /dap-challenge/local/
+dap-challenge/rollouts/

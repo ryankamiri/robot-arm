@@ -125,7 +125,7 @@ class EpisodeStore:
 
 
 class CameraVideo:
-    """Encode a timestamped secondary camera stream on the episode clock."""
+    """Encode a timestamped camera stream on the episode clock."""
 
     def __init__(self, path: Path, fps: int, started: float):
         self.path, self.fps, self.started = path, fps, started
@@ -138,7 +138,7 @@ class CameraVideo:
 
     def append(self, camera: CameraFrame) -> None:
         if self.timestamp is not None and (camera.timestamp < self.timestamp or camera.sequence < self.sequence):
-            raise ValueError('Mac camera timestamps or sequence went backward')
+            raise ValueError('Camera timestamps or sequence went backward')
         if camera.sequence == self.sequence:
             return
 
@@ -160,7 +160,7 @@ class CameraVideo:
 
     def close(self) -> None:
         if self.container is None:
-            raise ValueError('Mac camera supplied no recorded frames')
+            raise ValueError('Camera supplied no recorded frames')
 
         try:
             for packet in self.stream.encode():

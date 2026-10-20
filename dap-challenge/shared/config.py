@@ -46,3 +46,11 @@ def save_config(config: Mapping[str, Any], path: str | Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(config, sort_keys=False))
     return path
+
+
+def save_json(payload: Mapping[str, Any], path: Path) -> None:
+    """Atomically expose a compact JSON receipt or progress snapshot."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(plain_config(payload), indent=2, allow_nan=False))
+    temporary.replace(path)

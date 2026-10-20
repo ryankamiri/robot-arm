@@ -1,14 +1,15 @@
 """Train SAC on finalized scored archives; optionally wait for asynchronously added episodes."""
 
 import argparse
-import json
 from pathlib import Path
+import os
 import signal
 from threading import Event
+import time
 
 import torch
 
-from shared.config import load_config, save_config
+from shared.config import load_config, save_config, save_json
 from training.sac.config import validate_config
 from training.sac.learner import SACLearner
 from training.sac.run import LearnerRun, initialize_learner
@@ -69,32 +70,51 @@ def train_owned(args: argparse.Namespace, config: dict, output: Path) -> None:
                              run_id=learner.wandb_run_id, resume='must' if learner.wandb_run_id else None)
         learner.wandb_run_id = tracking.id
         run.save()
+        last_progress = 0.
+        draining = False
+        def owner_lost() -> bool:
+            owner_pid = getattr(args, 'owner_pid', None)
+            return owner_pid is not None and os.getppid() != owner_pid
+
         while not stopped.is_set():
+            if owner_lost():
+                stopped.set()
+                break
             run.check_publication()
             ingest_available(learner, run, inbox, args.max_scored_episodes)
+            draining = bool(getattr(args, 'drain_file', None) and Path(args.drain_file).exists())
             updated = False
             while learner.ready and not stopped.is_set():
+                if owner_lost():
+                    stopped.set()
+                    break
                 previous = learner.progress['actor_updates']
                 metrics = learner.update()
                 run.after_update(previous)
                 log_metrics(tracking, metrics, learner.progress['critic_updates'])
                 updated = True
                 ingest_available(learner, run, inbox, args.max_scored_episodes)
+                if time.monotonic() - last_progress >= 1:
+                    save_json({'state': 'training', 'updated_at': time.time(), 'metrics': metrics, **learner.progress}, output / 'progress.json')
+                    last_progress = time.monotonic()
+            save_json({'state': 'draining' if draining else 'waiting_for_scored_data', 'updated_at': time.time(), **learner.progress}, output / 'progress.json')
             if updated:
                 run.publish()
                 run.save()
             exhausted_attempts = args.max_scored_episodes is not None and len(learner.replay.records) >= args.max_scored_episodes
-            if exhausted_attempts or not args.watch:
+            if draining or exhausted_attempts or not args.watch:
                 break
             stopped.wait(1.0)
         run.close()
         run.save()
         state = 'budget_complete' if learner.progress['earned_updates'] and learner.progress['critic_updates'] == learner.progress['earned_updates'] else 'waiting_for_scored_data'
+        if draining and learner.progress['critic_updates'] < learner.progress['earned_updates']:
+            state = 'paused_before_startup_gate'
         if stopped.is_set():
             state = 'stopped'
-        (output / 'status.json').write_text(json.dumps({'state': state, 'publication': run.publisher.snapshot() if run.publisher else None, **learner.progress}, indent=2))
+        save_json({'state': state, 'updated_at': time.time(), 'publication': run.publisher.snapshot() if run.publisher else None, **learner.progress}, output / 'status.json')
     except Exception as error:
-        (output / 'status.json').write_text(json.dumps({'state': 'failed', 'error': str(error), 'publication': run.publisher.snapshot() if run.publisher else None, **learner.progress}, indent=2))
+        save_json({'state': 'failed', 'error': str(error), 'updated_at': time.time(), 'publication': run.publisher.snapshot() if run.publisher else None, **learner.progress}, output / 'status.json')
         if tracking is not None:
             tracking.finish(exit_code=1)
             tracking = None
@@ -115,6 +135,8 @@ def main() -> None:
     parser.add_argument('--reward-version', required=True)
     parser.add_argument('--device', choices=('cpu', 'mps'), default='mps')
     parser.add_argument('--watch', action='store_true')
+    parser.add_argument('--owner-pid', type=int, help='Save and stop if the session server exits unexpectedly.')
+    parser.add_argument('--drain-file', help='Stop accepting a session after draining all available scored replay credits.')
     parser.add_argument('--max-scored-episodes', type=int)
     train(parser.parse_args())
 

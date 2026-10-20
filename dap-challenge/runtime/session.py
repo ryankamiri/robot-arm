@@ -1,4 +1,4 @@
-"""Single-owner live execution shared by policy evaluation and future rollout collectors."""
+"""Single-owner live execution shared by policy evaluation and scored RL collection."""
 
 from concurrent.futures import Future
 from copy import deepcopy
@@ -34,6 +34,11 @@ class RuntimeSession:
         self.pending_runner: PolicyRunner | None = None
         self.publications: dict[str, tuple[int, str]] = {}
         self.metadata = {}
+        self.rl_owner = None
+        self.rl_run = None
+        self.rollout_store = None
+        self.collector = None
+        self.last_collector = None
         self.pose = load_config(pose_path) if pose_path.exists() else None
         self.client_id = None
         self.heartbeat_at = 0.0
@@ -94,7 +99,7 @@ class RuntimeSession:
             raise RuntimeError('Inference worker is not running.')
 
         values = payload or {}
-        if command in ('stop', 'disconnect', 'reset') and values.get('client_id') == self.client_id:
+        if command in ('stop', 'abort', 'disconnect', 'reset', 'rl_release') and values.get('client_id') == self.client_id:
             self.motion_cancel.set()
 
         future = Future()
@@ -119,6 +124,9 @@ class RuntimeSession:
 
     def stage_publication(self, runner: PolicyRunner) -> None:
         publication = getattr(runner, 'publication', None)
+        if self.rl_run and (publication is None or publication.run_id != self.rl_run):
+            raise ValueError('Only the active RL learner may publish during this session.')
+
         if publication is not None:
             previous = self.publications.get(publication.run_id)
             if previous is not None:
@@ -154,6 +162,7 @@ class RuntimeSession:
 
     def handle_fault(self, error: Exception) -> None:
         self.motion_cancel.set()
+        self.abort_attempt(str(error))
         message = str(error)
         try:
             self.hold_position()
@@ -161,7 +170,14 @@ class RuntimeSession:
             message += f'; HOLD UNCONFIRMED: {failure}'
         self.update_state(phase='fault', error=message)
 
+    def abort_attempt(self, reason: str) -> None:
+        if self.collector is not None:
+            self.collector.finish(error=reason)
+            self.last_collector = self.collector
+            self.collector = None
+
     def disconnect(self) -> None:
+        self.abort_attempt('Disconnected before this attempt was scored.')
         if self.devices is not None:
             self.devices.disconnect()
             self.devices = None
@@ -173,6 +189,29 @@ class RuntimeSession:
         self.update_state(connected=False, phase='disconnected', hold_confirmed=False, positions=None)
 
     def handle_command(self, command: str, payload: dict) -> None:
+        if command == 'rl_reserve':
+            if self.rl_owner is not None or self.state['phase'] in ('running', 'resetting') or (self.client_id and self.client_id != payload['client_id']):
+                raise ValueError('Stop motion and end the existing RL session first.')
+
+            self.adopt_policy(payload['runner'])
+            self.rl_owner, self.rl_run = payload['client_id'], payload['run_id']
+            self.rollout_store = payload['store']
+            return
+        if command == 'rl_release':
+            if self.rl_owner != payload.get('client_id'):
+                raise ValueError('This browser does not own the RL session.')
+
+            self.disconnect()
+            self.rl_owner = self.rl_run = self.rollout_store = None
+            return
+        if self.rl_owner is not None:
+            if command == 'load' or (command in ('connect', 'start') and payload.get('client_id') != self.rl_owner):
+                raise ValueError('The RL session owns this runtime.')
+            if command == 'start' and not payload.get('rl_attempt'):
+                raise ValueError('Start recorded attempts from the RL route.')
+            if command == 'reset' and self.collector is not None:
+                raise ValueError('Stop and review the RL attempt before returning to start.')
+
         if command == 'publish':
             self.stage_publication(payload['runner'])
             return
@@ -209,8 +248,23 @@ class RuntimeSession:
 
         if command == 'disconnect':
             self.disconnect()
-        elif command == 'stop':
+        elif command == 'abort':
+            self.abort_attempt('Attempt aborted by browser.')
             self.hold_position()
+            self.update_state(phase='holding', error=None)
+        elif command == 'stop':
+            if self.collector is not None:
+                arm, positions, observed = self.devices.observe()
+                mac = self.devices.secondary_frame()
+                if mac is None or max(self.clock()-arm.timestamp, self.clock()-mac.timestamp) > self.settings['control']['camera_stale_s']:
+                    raise ValueError('Final camera observation is stale or missing.')
+
+                collector = self.collector
+                self.hold_position()
+                collector.finish((arm, mac, positions, observed))
+                self.last_collector, self.collector = collector, None
+            else:
+                self.hold_position()
             self.update_state(phase='holding', error=None)
         elif command == 'capture_pose':
             if self.state['phase'] in ('running', 'resetting'):
@@ -243,6 +297,11 @@ class RuntimeSession:
                 if self.pending_runner is not None:
                     self.adopt_policy(self.pending_runner)
                 self.runner.reset()
+                if payload.get('rl_attempt'):
+                    if self.rollout_store is None or self.collector is not None or (self.last_collector and self.last_collector.thread.is_alive()):
+                        raise ValueError('Wait for the previous RL attempt to finalize.')
+
+                    self.collector = self.rollout_store.begin(payload['tasks'], self.runner.version, self.metadata)
                 self.update_state(phase='running', action_mode=payload['mode'], error=None, hold_confirmed=False)
             else:
                 if self.runner is not None:
@@ -310,6 +369,8 @@ class RuntimeSession:
             raise TimeoutError('Prediction became stale before command transmission.')
 
         sent = self.devices.send_target(targets)
+        if self.collector is not None and self.state['phase'] == 'running':
+            self.collector.transition(arm, mac, positions, observed, requested, sent, self.clock())
         if self.state['phase'] == 'resetting':
             self.reset_target = list(sent)
         self.update_state(requested_target=requested, sent_target=sent)
@@ -332,7 +393,7 @@ class RuntimeSession:
                             self.handle_command(command,payload)
                             future.set_result(self.snapshot())
                         except Exception as error:
-                            if self.devices is not None and (command in ('stop','disconnect','capture_pose','reset') or not isinstance(error,ValueError)):
+                            if self.devices is not None and (command in ('stop','abort','disconnect','capture_pose','reset','rl_release') or not isinstance(error,ValueError)):
                                 self.handle_fault(error)
                             future.set_exception(error)
                 if self.devices is not None:

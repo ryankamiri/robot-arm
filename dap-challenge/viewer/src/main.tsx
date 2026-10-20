@@ -1,12 +1,24 @@
 import { createRoot } from 'react-dom/client';
+import { BrowserRouter, NavLink, Route, Routes } from 'react-router';
 import { Recorder } from './recorder';
+import { RLRecorder } from './rl';
 import { Inference } from './inference';
 import './style.css';
 
+function Home() {
+  return <main>
+    <NavLink to="/record/bc">BC recorder</NavLink> | <NavLink to="/inference">Policy inference</NavLink> | <NavLink to="/record/rl">RL rollouts</NavLink>
+  </main>;
+}
+
 createRoot(document.getElementById('root')!).render(
-  window.location.pathname === '/record/bc'
-    ? <Recorder />
-    : window.location.pathname === '/inference'
-      ? <Inference />
-      : <main><a href="/record/bc">BC recorder</a> · <a href="/inference">Policy inference</a></main>,
+  <BrowserRouter>
+    <Routes>
+      <Route path="/" element={<Home />} />
+      <Route path="/record/bc" element={<Recorder />} />
+      <Route path="/record/rl" element={<RLRecorder />} />
+      <Route path="/inference" element={<Inference />} />
+      <Route path="*" element={<Home />} />
+    </Routes>
+  </BrowserRouter>,
 );
