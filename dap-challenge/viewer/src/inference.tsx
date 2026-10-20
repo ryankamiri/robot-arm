@@ -7,7 +7,7 @@ import { SessionStatus } from './components/session-status';
 type Checkpoint = { path: string; label: string };
 type Status = {
   demo: boolean; connected: boolean; phase: string; error: string | null; owned_by_you: boolean;
-  policy_version: string | null; hold_confirmed: boolean; action_mode: string;
+  policy_version: string | null; pending_policy_version: string | null; hold_confirmed: boolean; action_mode: string;
   starting_pose: { positions: number[] } | null; positions: number[] | null;
   requested_target: number[] | null; sent_target: number[] | null;
   settings: { control: Record<string, number> };
@@ -29,7 +29,7 @@ export function Inference() {
   const [busy, setBusy] = useState(false);
   const moving = status?.phase === 'running' || status?.phase === 'resetting';
   const owned = status?.connected && status.owned_by_you;
-  const loaded = status?.policy_version?.startsWith(`${selected} |`);
+  const loaded = Boolean(status?.policy_version || status?.pending_policy_version);
 
   useEffect(() => { if (status && !mode) setMode(status.action_mode); }, [status?.action_mode, mode]);
 
@@ -93,6 +93,7 @@ export function Inference() {
       </div>
       {warnings.map((warning, index) => <p key={index} role="status">{warning}</p>)}
       <p>Loaded policy: {status?.policy_version ?? 'None'}</p>
+      {status?.pending_policy_version && <p>Next attempt: {status.pending_policy_version}</p>}
       <label>Action selection
         <select aria-label="Action selection" value={mode} disabled={busy || moving} onChange={event => setMode(event.target.value)}>
           <option value="mean">Mean action — tanh(mean)</option>

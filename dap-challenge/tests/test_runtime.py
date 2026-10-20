@@ -185,8 +185,13 @@ class RuntimeTests(unittest.TestCase):
 
     def test_active_snapshots_cannot_be_replaced_and_another_browser_cannot_control(self):
         self.capture_start()
+        pending = FixedRunner()
+        pending.version = 'next-policy-v2'
+        self.session._command('publish', {'runner': pending})
+        self.assertIs(self.session.runner, self.runner)
+        self.assertEqual(self.session.snapshot()['pending_policy_version'], pending.version)
         with self.assertRaises(ValueError):
-            self.session._command('publish',{'runner':FixedRunner()})
+            self.session._command('load', {'runner': pending, **self.owner})
         with self.assertRaises(ValueError):
             self.session._command('stop',{'client_id':'other-tab'})
         with self.assertRaises(ValueError):

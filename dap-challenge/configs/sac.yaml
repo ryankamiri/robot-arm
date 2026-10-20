@@ -1,0 +1,68 @@
+initialization:
+  actor_checkpoint: dap-challenge/runs/bc-20261019-expanded-data/best_mae.pt
+  critic_checkpoint: dap-challenge/runs/bc-20261019-expanded-data/best_mae.pt
+  critic_is_base: true
+  resume_checkpoint: null
+
+model:
+  history_length: 3
+
+preprocessing:
+  image_width: 224
+  image_height: 168
+
+training:
+  batch_size: 32
+  discount: 0.999
+  critic_updates_per_actor_update: 2
+  critic_updates_per_new_transition: 2
+
+  warmup:
+    enabled: true
+    minimum_scored_episodes: 3
+    minimum_transitions: 500
+    critic_only_updates: 200
+
+  optimizer:
+    name: adam
+    actor_learning_rate: 0.0001
+    critic_learning_rate: 0.0003
+    max_gradient_norm: 1.0
+
+  entropy:
+    automatic: true
+    target: -6.0
+    initial_alpha: 0.01
+    learning_rate: 0.0001
+    every_actor_updates: 1
+
+  target_critics:
+    tau: 0.005
+    every_critic_updates: 1
+
+  replay:
+    cache_episodes: 1
+    sampling: uniform
+    replacement: true
+    retain_all_scored_episodes: true
+
+  checkpoint:
+    every_critic_updates: 500
+    after_ingestion_cycle: true
+    on_clean_stop: true
+    keep_latest: true
+    keep_periodic: 5
+
+  publication:
+    enabled: true
+    url: http://127.0.0.1:8001/api/inference/policy
+    timeout_s: 10.0
+    every_actor_updates: 100
+    at_budget_end: true
+    adopt_between_attempts: true
+
+wandb:
+  project: robot-arm
+  entity: ryanamiri05-northeastern-university
+  name: dap-sac
+  mode: online

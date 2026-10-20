@@ -23,6 +23,7 @@ class RuntimeSession:
         control = settings['control']
         if any(isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value <= 0 for value in control.values()):
             raise ValueError('Runtime control settings must be positive and finite.')
+
         if not isinstance(control['consecutive_deadline_misses'], int):
             raise ValueError('Deadline miss count must be an integer.')
 
@@ -30,6 +31,8 @@ class RuntimeSession:
         self.factory, self.clock = factory, clock
         self.devices = None
         self.runner: PolicyRunner | None = None
+        self.pending_runner: PolicyRunner | None = None
+        self.publications: dict[str, tuple[int, str]] = {}
         self.metadata = {}
         self.pose = load_config(pose_path) if pose_path.exists() else None
         self.client_id = None
@@ -40,7 +43,7 @@ class RuntimeSession:
         self.lock = Lock()
         self.frames: tuple[CameraFrame, CameraFrame] | None = None
         self.state = {'connected': False, 'phase': 'disconnected', 'error': None, 'hold_confirmed': False,
-                      'policy_version': None, 'action_mode': settings['policy']['action_mode'], 'starting_pose': self.pose,
+                      'policy_version': None, 'pending_policy_version': None, 'action_mode': settings['policy']['action_mode'], 'starting_pose': self.pose,
                       'positions': None, 'requested_target': None, 'sent_target': None,
                       'diagnostics': {'iterations': 0, 'missed_deadlines': 0, 'consecutive_misses': 0,
                                       'cycle_ms': 0.0, 'prediction_ms': 0.0, 'camera_age_s': 0.0, 'limited_commands': 0}}
@@ -89,6 +92,7 @@ class RuntimeSession:
     def request(self, command: str, payload: dict | None = None) -> dict:
         if not self.thread.is_alive() or self.shutdown.is_set():
             raise RuntimeError('Inference worker is not running.')
+
         values = payload or {}
         if command in ('stop', 'disconnect', 'reset') and values.get('client_id') == self.client_id:
             self.motion_cancel.set()
@@ -102,8 +106,38 @@ class RuntimeSession:
             raise
 
     def publish(self, runner: PolicyRunner) -> dict:
-        """Adopt a caller-owned snapshot only between attempts; never mutate active weights."""
+        """Stage a stable snapshot during an attempt or adopt it while idle."""
         return self.request('publish', {'runner': runner})
+
+    def _adopt(self, runner: PolicyRunner) -> None:
+        if isinstance(runner, PolicyRunner):
+            runner.to_device(self.settings['policy']['device'])
+        runner.reset()
+        self.runner = runner
+        self.pending_runner = None
+        self._update(policy_version=runner.version, pending_policy_version=None)
+
+    def _stage_publication(self, runner: PolicyRunner) -> None:
+        publication = getattr(runner, 'publication', None)
+        if publication is not None:
+            previous = self.publications.get(publication.run_id)
+            if previous is not None:
+                step, digest = previous
+                if publication.actor_updates < step:
+                    raise ValueError('Refusing an older actor publication.')
+
+                if publication.actor_updates == step:
+                    if publication.digest != digest:
+                        raise ValueError('Publication version already identifies different weights.')
+
+                    return
+        if self.state['phase'] in ('running', 'resetting', 'fault'):
+            self.pending_runner = runner
+            self._update(pending_policy_version=runner.version)
+        else:
+            self._adopt(runner)
+        if publication is not None:
+            self.publications[publication.run_id] = (publication.actor_updates, publication.digest)
 
     def _signature(self) -> dict:
         return deepcopy({'follower': self.metadata['follower'], 'calibration': self.metadata['calibration']['follower'],
@@ -139,20 +173,22 @@ class RuntimeSession:
         self._update(connected=False, phase='disconnected', hold_confirmed=False, positions=None)
 
     def _command(self, command: str, payload: dict) -> None:
-        if command in ('load', 'publish'):
+        if command == 'publish':
+            self._stage_publication(payload['runner'])
+            return
+        if command == 'load':
             if self.state['phase'] in ('running', 'resetting'):
                 raise ValueError('Stop the policy before changing its snapshot.')
-            if self.devices is not None and command == 'load' and payload.get('client_id') != self.client_id:
+
+            if self.devices is not None and payload.get('client_id') != self.client_id:
                 raise ValueError('This browser does not own the inference session.')
 
-            runner = payload['runner']
-            self.runner = runner
-            runner.reset()
-            self._update(policy_version=runner.version)
+            self._adopt(payload['runner'])
             return
         if command == 'connect':
             if self.devices is not None:
                 raise ValueError('Disconnect the current session first.')
+
             if not payload.get('client_id'):
                 raise ValueError('A browser owner ID is required.')
 
@@ -188,19 +224,24 @@ class RuntimeSession:
         elif command in ('start', 'reset'):
             if self.state['phase'] == 'resetting' or (command == 'start' and self.state['phase'] == 'running'):
                 raise ValueError('Stop the current attempt first.')
+
             if self.pose is None or self.pose['identity'] != self._signature():
                 raise ValueError('Capture a starting pose for this follower and calibration first.')
+
             if self.clock() - self.heartbeat_at > self.settings['control']['browser_timeout_s']:
                 raise ValueError('Browser heartbeat expired.')
 
             positions = self.devices.read_positions()
             normalize_controller(torch.tensor(self.pose['positions'], dtype=torch.float32), JOINT_NAMES)
             if command == 'start':
-                if self.runner is None or payload.get('mode') not in ('mean', 'sample'):
+                if (self.runner is None and self.pending_runner is None) or payload.get('mode') not in ('mean', 'sample'):
                     raise ValueError('Load a checkpoint and select mean or sample mode first.')
+
                 if max(abs(a-b) for a,b in zip(positions, self.pose['positions'], strict=True)) > self.settings['control']['start_tolerance']:
                     raise ValueError('Return to the captured starting pose before starting the policy.')
 
+                if self.pending_runner is not None:
+                    self._adopt(self.pending_runner)
                 self.runner.reset()
                 self._update(phase='running', action_mode=payload['mode'], error=None, hold_confirmed=False)
             else:
@@ -229,8 +270,10 @@ class RuntimeSession:
         active = self.state['phase'] in ('running', 'resetting')
         if active and age > self.settings['control']['camera_stale_s']:
             raise TimeoutError('Live camera frame is stale; policy stopped.')
+
         if active and now-self.heartbeat_at > self.settings['control']['browser_timeout_s']:
             raise TimeoutError('Browser heartbeat lost; policy stopped.')
+
         if not active or self.motion_cancel.is_set():
             return
 
@@ -239,6 +282,7 @@ class RuntimeSession:
         if self.state['phase'] == 'resetting':
             if now-self.reset_started > control['reset_timeout_s']:
                 raise TimeoutError('Return to start timed out.')
+
             if max(abs(a-b) for a,b in zip(positions,self.pose['positions'],strict=True)) <= control['reset_tolerance']:
                 self._hold()
                 self._update(phase='holding')

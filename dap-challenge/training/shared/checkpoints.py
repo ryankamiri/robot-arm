@@ -1,9 +1,7 @@
 """Training-state checkpoints, separate from inference-only Hub policy exports."""
 
 from dataclasses import dataclass
-import os
 from pathlib import Path
-import tempfile
 from typing import Any, Mapping
 
 import torch
@@ -12,6 +10,7 @@ from torch.optim import Optimizer
 
 from shared.config import _plain_config
 from .randomness import capture_rng_state, restore_rng_state
+from .utils import atomic_torch_save
 
 
 @dataclass
@@ -53,20 +52,7 @@ def save_checkpoint(
         "extra_state": dict(extra_state) if extra_state is not None else {},
         "rng": capture_rng_state(),
     }
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = None
-    try:
-        with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".tmp", delete=False) as file:
-            temporary_path = Path(file.name)
-            torch.save(payload, file)
-            file.flush()
-            os.fsync(file.fileno())
-        temporary_path.replace(path)
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-    return path
+    return atomic_torch_save(payload, Path(path))
 
 
 def load_checkpoint(

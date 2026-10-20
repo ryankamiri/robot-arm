@@ -16,6 +16,7 @@ from torch import Tensor
 from models.policy import DapPolicy
 from models.distributions import sample_tanh_gaussian
 from shared.devices import CameraFrame
+from shared.policy_snapshots import decode_actor
 from shared.normalization import JOINT_NAMES, denormalize_controller, normalize_controller
 from shared.observations import preprocess_image
 
@@ -88,6 +89,18 @@ class PolicyRunner:
         policy.load_state_dict(state['models']['actor'])
         version = f'{selection} | step {state["progress"]["optimizer_step"]} | {hashlib.sha256(content).hexdigest()[:12]}'
         return cls(policy, state['config'], version, device)
+
+    @classmethod
+    def from_snapshot(cls, content: bytes):
+        snapshot, policy, config = decode_actor(content)
+        runner = cls(policy, config, snapshot.version, 'cpu')
+        runner.publication = snapshot
+        return runner
+
+    def to_device(self, device: str) -> None:
+        """Move a staged frozen policy only when the runtime adopts its snapshot."""
+        self.device = torch.device(device)
+        self.policy.to(self.device)
 
     def reset(self) -> None:
         self.images.clear()

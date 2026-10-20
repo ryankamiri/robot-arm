@@ -4,13 +4,15 @@ from pathlib import Path
 import pickle
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from runtime.policy import PolicyRunner, checkpoint_catalog
 from runtime.session import RuntimeSession
 from runtime.streaming import CameraPeers
 from shared.discovery import device_inventory, resolve_connection
+from shared.policy_snapshots import MAX_SNAPSHOT_BYTES
 
 
 class Owner(BaseModel):
@@ -85,12 +87,38 @@ def inference_router(session: RuntimeSession, runs: Path, demo: bool, media: Cam
 
         return execute('load',{'runner':runner,'client_id':selection.client_id})
 
+    @router.post('/policy')
+    async def publish_policy(request: Request):
+        if request.headers.get('content-type', '').split(';')[0] != 'application/octet-stream':
+            raise HTTPException(415, 'Send an application/octet-stream actor snapshot.')
+
+        content = bytearray()
+        async for chunk in request.stream():
+            if len(content) + len(chunk) > MAX_SNAPSHOT_BYTES:
+                raise HTTPException(413, 'Actor snapshot exceeds the 16 MiB limit.')
+
+            content.extend(chunk)
+        try:
+            runner = await run_in_threadpool(PolicyRunner.from_snapshot, bytes(content))
+            state = await run_in_threadpool(session.publish, runner)
+        except TimeoutError as error:
+            raise HTTPException(503, 'Policy publication acknowledgement timed out.') from error
+        except (ValueError, KeyError, TypeError, OSError, RuntimeError, EOFError, pickle.UnpicklingError) as error:
+            raise HTTPException(409, str(error)) from error
+
+        publication = runner.publication
+        status = 'active' if state['policy_version'] == runner.version else 'pending' if state['pending_policy_version'] == runner.version else 'superseded'
+        return {'received_policy_version': runner.version, 'sha256': publication.digest,
+                'publication_state': status, 'active_policy_version': state['policy_version'],
+                'pending_policy_version': state['pending_policy_version']}
+
     @router.post('/connect')
     def connect(connection: Connect):
         values = connection.settings.model_dump()
         if not demo:
             if not values.get('follower_port') or not values.get('follower_id') or values.get('mac_camera_index') is None:
                 raise HTTPException(422,'Select a calibrated follower and two distinct live cameras.')
+
             if values.get('camera_fps') != 30 or values.get('width') != 640 or values.get('height') != 480:
                 raise HTTPException(422,'Use the trained 640×480 capture mode at 30 images per second.')
 
@@ -99,6 +127,7 @@ def inference_router(session: RuntimeSession, runs: Path, demo: bool, media: Cam
                 values = resolve_connection({**values,'leader_port':'','leader_serial':None},inventory)
             except (ValueError,OSError) as error:
                 raise HTTPException(409,str(error)) from error
+
         return execute('connect',{'settings':values,'client_id':connection.client_id})
 
     @router.post('/heartbeat')
