@@ -6,9 +6,10 @@ from pathlib import Path
 import torch
 
 from models.policy import DapPolicy
-from shared.policy_snapshots import encode_actor, send_actor
+from shared.policy_snapshots import encode_actor
 from training.sac.learner import SACLearner
 from training.shared.checkpoints import save_checkpoint
+from training.shared.publication import AsyncPolicyPublisher
 from training.shared.utils import atomic_copy
 
 
@@ -58,7 +59,8 @@ class LearnerRun:
         self.learner = learner
         self.output = output
         self.output.mkdir(parents=True, exist_ok=True)
-        self.publication_ack: dict | None = None
+        settings = learner.settings['publication']
+        self.publisher = AsyncPolicyPublisher(settings['url'], settings['timeout_s']) if settings['enabled'] else None
 
     def save(self, periodic: bool = False) -> None:
         self.learner.save(self.output / 'learner' / 'latest.pt')
@@ -95,25 +97,50 @@ class LearnerRun:
         atomic_copy(path, self.output / 'latest.pt')
         return path
 
+    @property
+    def publication_ack(self) -> dict | None:
+        return self.publisher.snapshot()['acknowledgement'] if self.publisher is not None else None
+
+    def check_publication(self) -> None:
+        """Surface delivery failures while preserving the latest healthy learner state."""
+        if self.publisher is not None:
+            try:
+                self.publisher.check()
+            except Exception:
+                if not self.learner.faulted:
+                    self.save()
+                raise
+
     def publish(self) -> dict:
-        """Send a cloned actor directly to FastAPI without writing or reading a snapshot file."""
+        """Clone a stable actor and enqueue background HTTP delivery without disk I/O."""
         if self.learner.faulted:
             raise RuntimeError('cannot publish after a failed learner update')
 
-        settings = self.learner.settings['publication']
-        if not settings['enabled']:
+        self.check_publication()
+        if self.publisher is None:
             return {'publication_state': 'disabled'}
 
         snapshot = encode_actor(self.learner.actor, self.learner.config['preprocessing'],
                                 self.output.name, self.learner.progress['actor_updates'])
         try:
-            self.publication_ack = send_actor(snapshot, settings['url'], settings['timeout_s'])
+            return self.publisher.submit(snapshot)
         except Exception:
-            self.save()
+            if not self.learner.faulted:
+                self.save()
             raise
-        return self.publication_ack
+
+    def close(self, flush: bool = True, raise_errors: bool = True) -> None:
+        """Join background delivery before the learner reports a terminal run outcome."""
+        if self.publisher is not None:
+            try:
+                self.publisher.close(flush, raise_errors)
+            except Exception:
+                if not self.learner.faulted:
+                    self.save()
+                raise
 
     def after_update(self, previous_actor_updates: int) -> None:
+        self.check_publication()
         progress = self.learner.progress
         if progress['actor_updates'] != previous_actor_updates and progress['actor_updates'] % self.learner.settings['publication']['every_actor_updates'] == 0:
             self.publish()

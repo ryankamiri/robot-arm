@@ -179,13 +179,17 @@ class PolicyPublicationTests(unittest.TestCase):
         run = LearnerRun(learner, self.root / 'run')
         def received(snapshot, url, timeout):
             return {'received_policy_version': snapshot.version, 'sha256': snapshot.digest, 'publication_state': 'pending'}
-        with patch('training.sac.run.send_actor', side_effect=received):
-            self.assertEqual(run.publish()['publication_state'], 'pending')
+        with patch('training.shared.publication.send_actor', side_effect=received):
+            self.assertEqual(run.publish()['publication_state'], 'queued')
+            run.close()
+        self.assertEqual(run.publication_ack['publication_state'], 'pending')
         self.assertFalse(list(run.output.rglob('*')))
-        with patch('training.sac.run.send_actor', side_effect=RuntimeError('backend down')):
+        failed = LearnerRun(learner, self.root / 'failed-run')
+        with patch('training.shared.publication.send_actor', side_effect=RuntimeError('backend down')):
+            failed.publish()
             with self.assertRaisesRegex(RuntimeError, 'backend down'):
-                run.publish()
-        self.assertTrue((run.output / 'learner' / 'latest.pt').exists())
+                failed.close()
+        self.assertTrue((failed.output / 'learner' / 'latest.pt').exists())
 
     def test_client_rejects_wrong_acknowledgement_and_remote_destination(self):
         with patch('shared.policy_snapshots.urlopen', return_value=BytesIO(json.dumps({'received_policy_version': 'wrong'}).encode())):

@@ -70,6 +70,7 @@ def train_owned(args: argparse.Namespace, config: dict, output: Path) -> None:
         learner.wandb_run_id = tracking.id
         run.save()
         while not stopped.is_set():
+            run.check_publication()
             ingest_available(learner, run, inbox, args.max_scored_episodes)
             updated = False
             while learner.ready and not stopped.is_set():
@@ -86,18 +87,20 @@ def train_owned(args: argparse.Namespace, config: dict, output: Path) -> None:
             if exhausted_attempts or not args.watch:
                 break
             stopped.wait(1.0)
+        run.close()
         run.save()
         state = 'budget_complete' if learner.progress['earned_updates'] and learner.progress['critic_updates'] == learner.progress['earned_updates'] else 'waiting_for_scored_data'
         if stopped.is_set():
             state = 'stopped'
-        (output / 'status.json').write_text(json.dumps({'state': state, **learner.progress}, indent=2))
+        (output / 'status.json').write_text(json.dumps({'state': state, 'publication': run.publisher.snapshot() if run.publisher else None, **learner.progress}, indent=2))
     except Exception as error:
-        (output / 'status.json').write_text(json.dumps({'state': 'failed', 'error': str(error), **learner.progress}, indent=2))
+        (output / 'status.json').write_text(json.dumps({'state': 'failed', 'error': str(error), 'publication': run.publisher.snapshot() if run.publisher else None, **learner.progress}, indent=2))
         if tracking is not None:
             tracking.finish(exit_code=1)
             tracking = None
         raise
     finally:
+        run.close(flush=False, raise_errors=False)
         if tracking is not None:
             tracking.finish()
         for code, handler in handlers.items():
