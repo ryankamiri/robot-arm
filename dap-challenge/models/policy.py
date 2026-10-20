@@ -7,7 +7,8 @@ from huggingface_hub import PyTorchModelHubMixin
 from jaxtyping import Float
 from torch import Tensor, nn
 
-from .architecture import DapActorNetwork, GaussianParameters, ImageEncoder
+from .actor import DapActorNetwork
+from .architecture import GaussianParameters, ImageEncoder
 from .distributions import ActionSample, sample_tanh_gaussian
 
 

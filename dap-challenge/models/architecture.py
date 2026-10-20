@@ -1,4 +1,4 @@
-"""Observation fusion and Gaussian heads for the dap actor."""
+"""Shared observation encoders and Gaussian parameter outputs."""
 
 from dataclasses import dataclass
 
@@ -6,7 +6,7 @@ import torch
 from jaxtyping import Float
 from torch import Tensor, nn
 
-from .dimensions import A, C_RGB, I_INPUTS, D_FUSION, D_IMG, D_OBS, D_POS
+from .dimensions import A, C_RGB, I_INPUTS, D_IMG, D_OBS, D_POS
 
 
 class ResidualBlock(nn.Module):
@@ -65,8 +65,8 @@ class GaussianParameters:
     log_std: Float[Tensor, "B A"]
 
 
-class DapActorNetwork(nn.Module):
-    """Encode each observation, flatten history, and predict Gaussian parameters."""
+class ObservationEncoder(nn.Module):
+    """Encode both camera views and positions, then flatten the observation history."""
 
     def __init__(self, image_encoder: nn.Module, history_length: int) -> None:
         super().__init__()
@@ -83,21 +83,13 @@ class DapActorNetwork(nn.Module):
             nn.Linear(D_POS, D_POS),
             nn.ReLU(),
         )
-        self.fusion = nn.Sequential(
-            nn.Linear(history_length * D_OBS, 256),
-            nn.ReLU(),
-            nn.Linear(256, D_FUSION),
-            nn.ReLU(),
-        )
-        self.mean_head = nn.Linear(D_FUSION, A)
-        self.log_std_head = nn.Linear(D_FUSION, A)
 
     def forward(
         self,
         images: Float[Tensor, "B L I C_in H_in W_in"],
         positions: Float[Tensor, "B L A"],
-    ) -> GaussianParameters:
-        """Map images [B,L,I,C_in,H_in,W_in] and positions [B,L,A] to two [B,A] tensors."""
+    ) -> Float[Tensor, "B D_flat"]:
+        """Map camera/position history to D_flat=L*D_OBS observation features."""
         if images.ndim != 6:
             raise ValueError("images must have shape [B, L, I, C_in, H_in, W_in]")
 
@@ -137,9 +129,4 @@ class DapActorNetwork(nn.Module):
             (image_features, position_features), dim=-1
         )
         D_flat = L * D_OBS
-        flattened: Float[Tensor, "B D_flat"] = per_observation.reshape(B, D_flat)
-        features: Float[Tensor, "B D_FUSION"] = self.fusion(flattened)
-        return GaussianParameters(
-            mean=self.mean_head(features),
-            log_std=self.log_std_head(features),
-        )
+        return per_observation.reshape(B, D_flat)
