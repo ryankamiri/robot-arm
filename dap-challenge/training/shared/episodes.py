@@ -47,7 +47,7 @@ def discover_episodes(root: str | Path) -> list[Path]:
     return paths
 
 
-def _video_frames(path: Path) -> Iterator[UInt8[Tensor, "H_src W_src C_in"]]:
+def video_frames(path: Path) -> Iterator[UInt8[Tensor, "H_src W_src C_in"]]:
     """Decode display-order RGB frames without inferring alignment from FPS."""
     with av.open(str(path)) as container:
         if not container.streams.video:
@@ -178,7 +178,7 @@ def load_episode(
 
         decoded = []
         try:
-            for frame in _video_frames(directory / filename):
+            for frame in video_frames(directory / filename):
                 if ('width' in info and info['width'] != frame.shape[1]) or ('height' in info and info['height'] != frame.shape[0]):
                     raise ValueError(f'{name} video dimensions disagree with metadata')
 

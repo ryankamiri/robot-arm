@@ -63,38 +63,38 @@ class RuntimeTests(unittest.TestCase):
                                       lambda settings:self.devices,lambda:self.now)
         self.owner = {'client_id':'test-owner'}
         self.runner = FixedRunner()
-        self.session._command('publish',{'runner':self.runner})
-        self.session._command('connect',{**self.owner,'settings':{}})
-        self.addCleanup(self.session._disconnect)
+        self.session.handle_command('publish',{'runner':self.runner})
+        self.session.handle_command('connect',{**self.owner,'settings':{}})
+        self.addCleanup(self.session.disconnect)
 
     def capture_start(self):
-        self.session._command('capture_pose',self.owner)
-        self.session._command('start',{**self.owner,'mode':'mean'})
+        self.session.handle_command('capture_pose',self.owner)
+        self.session.handle_command('start',{**self.owner,'mode':'mean'})
 
     def test_connect_holds_capture_does_not_move_start_requires_pose_and_current_position(self):
         self.assertEqual(self.session.snapshot()['phase'],'holding')
         self.assertTrue(self.session.snapshot()['hold_confirmed'])
         with self.assertRaisesRegex(ValueError,'Capture'):
-            self.session._command('start',{**self.owner,'mode':'mean'})
+            self.session.handle_command('start',{**self.owner,'mode':'mean'})
         before = self.devices.read_positions()
-        self.session._command('capture_pose',self.owner)
+        self.session.handle_command('capture_pose',self.owner)
         self.assertEqual(self.devices.read_positions(),before)
         self.assertTrue((self.root/'pose.yaml').is_file())
         self.devices.positions[0] = 20.
         with self.assertRaisesRegex(ValueError,'Return'):
-            self.session._command('start',{**self.owner,'mode':'mean'})
+            self.session.handle_command('start',{**self.owner,'mode':'mean'})
         self.assertEqual(list(self.root.glob('*.mp4')),[])
 
     def test_clamps_requested_targets_and_stop_holds_measured_pose(self):
         self.capture_start()
-        self.session._tick(self.now,1/30)
+        self.session.tick(self.now,1/30)
         self.assertEqual(self.devices.positions,[2.] * 5 + [52.])
         state = self.session.snapshot()
         self.assertEqual(state['requested_target'],self.runner.target)
         self.assertEqual(state['sent_target'],[2.] * 5 + [52.])
         self.assertEqual(state['diagnostics']['limited_commands'],1)
         self.devices.positions[0] = 1.5
-        self.session._command('stop',self.owner)
+        self.session.handle_command('stop',self.owner)
         self.assertEqual(self.devices.positions[0],1.5)
         self.assertEqual(self.session.snapshot()['phase'],'holding')
         self.assertGreaterEqual(self.runner.resets,3)
@@ -104,15 +104,15 @@ class RuntimeTests(unittest.TestCase):
         arm = CameraFrame(np.zeros((12,16,3),dtype=np.uint8),0,self.now-1)
         with patch.object(self.devices,'observe',return_value=(arm,self.devices.positions,self.now)), patch.object(self.devices,'secondary_frame',return_value=arm):
             with self.assertRaisesRegex(TimeoutError,'camera'):
-                self.session._tick(self.now,1/30)
+                self.session.tick(self.now,1/30)
         self.assertEqual(self.devices.positions,[0.] * 5 + [50.])
         self.now += 3
         with self.assertRaisesRegex(TimeoutError,'heartbeat'):
-            self.session._tick(self.now,1/30)
+            self.session.tick(self.now,1/30)
         self.session.heartbeat('test-owner')
         self.runner.target[0] = float('nan')
         with self.assertRaises(ValueError):
-            self.session._tick(self.now,1/30)
+            self.session.tick(self.now,1/30)
         self.assertEqual(self.devices.positions,[0.] * 5 + [50.])
 
     def test_stop_cancel_during_prediction_and_camera_age_rechecked_before_send(self):
@@ -122,7 +122,7 @@ class RuntimeTests(unittest.TestCase):
             self.session.motion_cancel.set()
             return original(mode)
         self.runner.predict = cancel
-        self.session._tick(self.now,1/30)
+        self.session.tick(self.now,1/30)
         self.assertEqual(self.devices.positions[0],0.)
         self.session.motion_cancel.clear()
         def slow(mode):
@@ -130,28 +130,28 @@ class RuntimeTests(unittest.TestCase):
             return original(mode)
         self.runner.predict = slow
         with self.assertRaisesRegex(TimeoutError,'stale'):
-            self.session._tick(10.,1/30)
+            self.session.tick(10.,1/30)
         self.assertEqual(self.devices.positions[0],0.)
 
     def test_return_to_pose_is_gradual_does_not_start_policy_and_calibration_is_bound(self):
-        self.session._command('capture_pose',self.owner)
+        self.session.handle_command('capture_pose',self.owner)
         self.devices.positions[0] = 10.
-        self.session._command('reset',self.owner)
-        self.session._tick(self.now,1/30)
+        self.session.handle_command('reset',self.owner)
+        self.session.tick(self.now,1/30)
         self.assertAlmostEqual(self.devices.positions[0],9.5)
         self.assertEqual(self.session.snapshot()['phase'],'resetting')
-        self.session._command('stop',self.owner)
+        self.session.handle_command('stop',self.owner)
         self.session.metadata['calibration']['follower']['source'] = 'different'
         with self.assertRaisesRegex(ValueError,'calibration'):
-            self.session._command('reset',self.owner)
+            self.session.handle_command('reset',self.owner)
 
     def test_return_interrupts_policy_and_finishes_holding_without_predictions(self):
         self.capture_start()
         self.devices.positions[0] = 10.
         with patch.object(self.runner, 'predict', wraps=self.runner.predict) as predict:
-            self.session._command('reset', self.owner)
+            self.session.handle_command('reset', self.owner)
             for _ in range(40):
-                self.session._tick(self.now, 1/30)
+                self.session.tick(self.now, 1/30)
                 if self.session.snapshot()['phase'] == 'holding':
                     break
             predict.assert_not_called()
@@ -159,7 +159,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertLessEqual(abs(self.devices.positions[0]), self.config['control']['reset_tolerance'])
 
     def test_return_advances_command_when_small_goals_do_not_move_motor(self):
-        self.session._command('capture_pose', self.owner)
+        self.session.handle_command('capture_pose', self.owner)
         self.devices.positions[0] = 10.
         sent = []
 
@@ -170,9 +170,9 @@ class RuntimeTests(unittest.TestCase):
             return targets.copy()
 
         with patch.object(self.devices, 'send_target', side_effect=sluggish_motor):
-            self.session._command('reset', self.owner)
+            self.session.handle_command('reset', self.owner)
             for _ in range(80):
-                self.session._tick(self.now, 1/30)
+                self.session.tick(self.now, 1/30)
                 if self.session.snapshot()['phase'] == 'holding':
                     break
         self.assertEqual(self.session.snapshot()['phase'], 'holding')
@@ -187,22 +187,22 @@ class RuntimeTests(unittest.TestCase):
         self.capture_start()
         pending = FixedRunner()
         pending.version = 'next-policy-v2'
-        self.session._command('publish', {'runner': pending})
+        self.session.handle_command('publish', {'runner': pending})
         self.assertIs(self.session.runner, self.runner)
         self.assertEqual(self.session.snapshot()['pending_policy_version'], pending.version)
         with self.assertRaises(ValueError):
-            self.session._command('load', {'runner': pending, **self.owner})
+            self.session.handle_command('load', {'runner': pending, **self.owner})
         with self.assertRaises(ValueError):
-            self.session._command('stop',{'client_id':'other-tab'})
+            self.session.handle_command('stop',{'client_id':'other-tab'})
         with self.assertRaises(ValueError):
             self.session.heartbeat('other-tab')
 
     def test_fault_holds_when_possible_and_reports_unconfirmed_hold_on_bus_failure(self):
-        self.session._fault(ConnectionError('camera failed'))
+        self.session.handle_fault(ConnectionError('camera failed'))
         self.assertEqual(self.session.snapshot()['phase'],'fault')
         self.assertTrue(self.session.snapshot()['hold_confirmed'])
         with patch.object(self.devices,'read_positions',side_effect=ConnectionError('bus lost')):
-            self.session._fault(ConnectionError('bus lost'))
+            self.session.handle_fault(ConnectionError('bus lost'))
         self.assertFalse(self.session.snapshot()['hold_confirmed'])
         self.assertIn('HOLD UNCONFIRMED',self.session.snapshot()['error'])
 
@@ -212,10 +212,10 @@ class RuntimeTests(unittest.TestCase):
             contender.acquire('BC recorder')
         with patch.object(self.devices,'disconnect',side_effect=ConnectionError('release failed')):
             with self.assertRaises(ConnectionError):
-                self.session._disconnect()
+                self.session.disconnect()
         with self.assertRaises(ValueError):
             contender.acquire('BC recorder')
-        self.session._disconnect()
+        self.session.disconnect()
         contender.acquire('BC recorder')
         contender.release('BC recorder')
 

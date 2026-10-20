@@ -35,7 +35,7 @@ class RecorderSession:
                                       'max_cycle_s': 0.0, 'camera_age_s': 0.0}}
         self.cleanup_failed = False
         self.owner_file = None
-        self.thread = Thread(target=self._run, daemon=True, name='robot-owner')
+        self.thread = Thread(target=self.run_loop, daemon=True, name='robot-owner')
 
     def start(self) -> None:
         self.owner_file = (self.store.root / '.recorder.lock').open('a')
@@ -66,7 +66,7 @@ class RecorderSession:
         state['pending'] = self.store.list_pending()
         return state
 
-    def _update(self, **values: Any) -> None:
+    def update_state(self, **values: Any) -> None:
         with self.lock:
             self.state.update(values)
 
@@ -78,8 +78,8 @@ class RecorderSession:
         self.commands.put((command, payload or {}, future))
         return future.result(timeout=30)
 
-    def _command(self, command: str, payload: dict[str, Any]) -> None:
-        self._complete_finalization()
+    def handle_command(self, command: str, payload: dict[str, Any]) -> None:
+        self.complete_finalization()
         if command == 'connect':
             if self.devices is not None or self.cleanup_failed:
                 raise ValueError('already connected or prior cleanup failed; inspect status')
@@ -90,22 +90,22 @@ class RecorderSession:
                 self.devices = devices
                 self.device_metadata = devices.connect()
             except Exception as error:
-                self._fault(error)
+                self.handle_fault(error)
                 raise
             self.next_tick_at = time.monotonic()
-            self._update(connected=True, phase='ready', error=None,
+            self.update_state(connected=True, phase='ready', error=None,
                          device_mode=self.device_metadata['device_mode'])
         elif command == 'start':
             if self.devices is None or self.state['phase'] != 'ready':
                 raise ValueError('finish reviewing/resetting and connect devices before recording')
 
             self.writer = EpisodeWriter(self.store, deepcopy(self.device_metadata), fps=30)
-            self._update(phase='recording', active_episode_id=self.writer.episode_id, recorded_rows=0)
+            self.update_state(phase='recording', active_episode_id=self.writer.episode_id, recorded_rows=0)
         elif command == 'stop':
             if self.writer is None:
                 raise ValueError('no recording is running')
 
-            self._begin_finalization()
+            self.begin_finalization()
         elif command in ('keep', 'discard'):
             if self.writer is not None or self.finalization is not None:
                 raise ValueError('wait for recording finalization before reviewing a take')
@@ -114,32 +114,32 @@ class RecorderSession:
                 self.store.keep(payload['episode_id'], payload.get('name', ''), payload.get('notes', ''))
             else:
                 self.store.discard(payload['episode_id'])
-            self._update(phase='reset' if self.devices is not None else 'disconnected', active_episode_id=None)
+            self.update_state(phase='reset' if self.devices is not None else 'disconnected', active_episode_id=None)
         elif command == 'ready':
             if self.devices is None or self.state['phase'] != 'reset':
                 raise ValueError('reset is only available after review in a connected session')
 
-            self._update(phase='ready', active_episode_id=None)
+            self.update_state(phase='ready', active_episode_id=None)
         elif command == 'disconnect':
             if self.writer is not None:
-                self._begin_finalization('Session ended during recording; take is incomplete.')
-            self._disconnect()
-            self._update(phase='disconnected', connected=False, active_episode_id=None)
+                self.begin_finalization('Session ended during recording; take is incomplete.')
+            self.disconnect()
+            self.update_state(phase='disconnected', connected=False, active_episode_id=None)
         elif command == 'inspect_camera':
             if self.devices is not None:
                 raise ValueError('disconnect before inspecting camera settings')
 
             self.lease.acquire('camera inspection')
             try:
-                self._update(camera_profile=inspect_camera(payload['camera_index']))
+                self.update_state(camera_profile=inspect_camera(payload['camera_index']))
             finally:
                 self.lease.release('camera inspection')
         else:
             raise ValueError('unknown recorder command')
 
-    def _disconnect(self) -> None:
+    def disconnect(self) -> None:
         devices, self.devices = self.devices, None
-        self._update(connected=False)
+        self.update_state(connected=False)
         if devices is not None:
             try:
                 devices.disconnect()
@@ -149,12 +149,12 @@ class RecorderSession:
         if not self.cleanup_failed:
             self.lease.release('BC recorder')
 
-    def _begin_finalization(self, error: str | None = None) -> None:
+    def begin_finalization(self, error: str | None = None) -> None:
         writer, self.writer = self.writer, None
         self.finalization = self.finalizer.submit(writer.finish, error)
-        self._update(phase='finalizing')
+        self.update_state(phase='finalizing')
 
-    def _complete_finalization(self) -> None:
+    def complete_finalization(self) -> None:
         if self.finalization is None or not self.finalization.done():
             return
 
@@ -162,27 +162,27 @@ class RecorderSession:
         try:
             finished.result()
             if self.state['phase'] != 'error':
-                self._update(phase='review' if self.devices is not None else 'disconnected')
+                self.update_state(phase='review' if self.devices is not None else 'disconnected')
             if self.stop_response is not None:
                 self.stop_response.set_result(self.snapshot())
         except Exception as error:
-            self._fault(error)
+            self.handle_fault(error)
             if self.stop_response is not None:
                 self.stop_response.set_exception(error)
         finally:
             self.stop_response = None
 
-    def _fault(self, error: Exception) -> None:
+    def handle_fault(self, error: Exception) -> None:
         message = str(error)
         if self.writer is not None:
-            self._begin_finalization(message)
+            self.begin_finalization(message)
         try:
-            self._disconnect()
+            self.disconnect()
         except Exception as failure:
             message += f'; {failure}'
-        self._update(phase='error', connected=False, error=message)
+        self.update_state(phase='error', connected=False, error=message)
 
-    def _tick(self) -> None:
+    def tick(self) -> None:
         scheduled = self.next_tick_at
         frame, positions, observed = self.devices.observe()
         sent = self.devices.command()
@@ -195,7 +195,7 @@ class RecorderSession:
         age = observed - frame.timestamp
         if self.writer is not None:
             self.writer.record_timing(duration, age)
-            self._update(recorded_rows=len(self.writer.rows))
+            self.update_state(recorded_rows=len(self.writer.rows))
         with self.lock:
             diagnostics = self.state['diagnostics']
             diagnostics['iterations'] += 1
@@ -205,7 +205,7 @@ class RecorderSession:
         self.next_tick_at = max(scheduled + 1 / 30, finished)
         self.stop_event.wait(max(0.0, self.next_tick_at - time.monotonic()))
 
-    def _run(self) -> None:
+    def run_loop(self) -> None:
         try:
             while not self.stop_event.is_set():
                 try:
@@ -214,24 +214,24 @@ class RecorderSession:
                     pass
                 else:
                     try:
-                        self._command(command, payload)
+                        self.handle_command(command, payload)
                         if command == 'stop' and self.finalization is not None:
                             self.stop_response = future
                         else:
                             future.set_result(self.snapshot())
                     except Exception as error:
                         if command in ('start', 'stop', 'disconnect') and not isinstance(error, ValueError):
-                            self._fault(error)
+                            self.handle_fault(error)
                         future.set_exception(error)
-                self._complete_finalization()
+                self.complete_finalization()
                 if self.devices is not None:
                     try:
-                        self._tick()
+                        self.tick()
                     except Exception as error:
-                        self._fault(error)
+                        self.handle_fault(error)
         finally:
             try:
                 if self.writer is not None:
-                    self._begin_finalization('Recorder server shut down during recording.')
+                    self.begin_finalization('Recorder server shut down during recording.')
             finally:
-                self._disconnect()
+                self.disconnect()

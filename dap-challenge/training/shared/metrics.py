@@ -5,7 +5,7 @@ from typing import Any, Literal, Mapping
 
 import wandb
 
-from shared.config import _plain_config
+from shared.config import plain_config
 
 
 def start_run(
@@ -30,7 +30,7 @@ def start_run(
     directory.mkdir(parents=True, exist_ok=True)
     run = wandb.init(
         project=project,
-        config=_plain_config(config),
+        config=plain_config(config),
         mode=mode,
         dir=str(directory),
         entity=entity,

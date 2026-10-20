@@ -85,7 +85,7 @@ class SACLearner:
         warmup = self.settings['warmup']
         return len(self.replay.records) >= warmup['minimum_scored_episodes'] and len(self.replay) >= warmup['minimum_transitions']
 
-    def _optimize(self, loss: Float[Tensor, ""], optimizer: Optimizer, parameters: Iterable[nn.Parameter]) -> float:
+    def optimize(self, loss: Float[Tensor, ""], optimizer: Optimizer, parameters: Iterable[nn.Parameter]) -> float:
         if not torch.isfinite(loss):
             raise FloatingPointError('nonfinite SAC loss; learner stopped')
 
@@ -107,14 +107,14 @@ class SACLearner:
         try:
             if batch is None:
                 batch = self.replay.sample(self.settings['batch_size'], self.device)
-            metrics = self._update(batch)
+            metrics = self.update_batch(batch)
         except Exception:
             self.faulted = True
             raise
         self.last_metrics = metrics
         return metrics
 
-    def _update(self, batch: ReplayBatch) -> dict[str, float]:
+    def update_batch(self, batch: ReplayBatch) -> dict[str, float]:
         alpha = self.temperature().detach()
         if not torch.isfinite(alpha) or alpha <= 0:
             raise FloatingPointError('entropy coefficient must remain finite and positive')
@@ -129,7 +129,7 @@ class SACLearner:
 
         values = self.critics(batch.images, batch.positions, batch.actions)
         loss = critic_loss(values, target)
-        norm = self._optimize(loss, self.critic_optimizer, self.critics.parameters())
+        norm = self.optimize(loss, self.critic_optimizer, self.critics.parameters())
         with torch.no_grad():
             for target_parameter, parameter in zip(self.targets.parameters(), self.critics.parameters()):
                 target_parameter.lerp_(parameter, self.settings['target_critics']['tau'])
@@ -143,7 +143,7 @@ class SACLearner:
         else:
             self.progress['post_warmup_updates'] += 1
             if self.progress['post_warmup_updates'] % self.settings['critic_updates_per_actor_update'] == 0:
-                metrics.update(self._update_actor(batch))
+                metrics.update(self.update_actor(batch))
         metrics.update({'train/alpha': self.temperature().detach().item(),
                         'replay/transitions': float(len(self.replay)),
                         'train/remaining_critic_updates': float(self.progress['earned_updates'] - self.progress['critic_updates']),
@@ -153,18 +153,18 @@ class SACLearner:
 
         return metrics
 
-    def _update_actor(self, batch: ReplayBatch) -> dict[str, float]:
+    def update_actor(self, batch: ReplayBatch) -> dict[str, float]:
         self.critic_optimizer.zero_grad(set_to_none=True)
         self.critics.requires_grad_(False)
         try:
             sample = self.actor.sample(batch.images, batch.positions)
             values = self.critics(batch.images, batch.positions, sample.actions)
             loss = actor_loss(values, sample.log_prob, self.temperature())
-            norm = self._optimize(loss, self.actor_optimizer, self.actor.parameters())
+            norm = self.optimize(loss, self.actor_optimizer, self.actor.parameters())
         finally:
             self.critics.requires_grad_(True)
         alpha_loss = temperature_loss(self.temperature.log_alpha, sample.log_prob, self.settings['entropy']['target'])
-        self._optimize(alpha_loss, self.alpha_optimizer, self.temperature.parameters())
+        self.optimize(alpha_loss, self.alpha_optimizer, self.temperature.parameters())
         self.progress['actor_updates'] += 1
         return {'train/actor_loss': loss.item(), 'train/actor_gradient_norm': norm,
                 'train/temperature_loss': alpha_loss.item(), 'train/entropy': -sample.log_prob.detach().mean().item()}

@@ -103,7 +103,7 @@ class CameraCapture:
         self.error: str | None = None
         self.reported_fps = None
         self.source_pixel_format = None
-        self.thread = Thread(target=self._capture, daemon=True)
+        self.thread = Thread(target=self.capture_loop, daemon=True)
 
     def connect(self) -> None:
         self.thread.start()
@@ -113,7 +113,7 @@ class CameraCapture:
 
         self.read()
 
-    def _capture(self) -> None:
+    def capture_loop(self) -> None:
         try:
             with open_camera(self.index, self.width, self.height, self.fps) as capture:
                 self.reported_fps = reported_camera_rate(capture)

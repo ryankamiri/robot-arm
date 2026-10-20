@@ -71,7 +71,7 @@ class CameraTests(unittest.TestCase):
         with patch('shared.devices.open_camera') as opened:
             opened.return_value.__enter__.return_value = capture
             with patch('shared.devices.camera_frames', side_effect=frames):
-                camera._capture()
+                camera.capture_loop()
             opened.return_value.__exit__.assert_called_once()
         result = camera.read()
         self.assertEqual(result.rgb.shape, (6, 8, 3))
@@ -88,7 +88,7 @@ class CameraTests(unittest.TestCase):
         with patch('shared.devices.open_camera') as opened:
             opened.return_value.__enter__.return_value = self.container()
             with patch('shared.devices.camera_frames', return_value=iter([frame])):
-                camera._capture()
+                camera.capture_loop()
         np.testing.assert_array_equal(camera.read().rgb, np.rot90(rgb, k=-1))
         self.assertEqual(camera.read().rgb.shape, (8, 6, 3))
         self.assertTrue(camera.read().rgb.flags.c_contiguous)
@@ -98,7 +98,7 @@ class CameraTests(unittest.TestCase):
         with patch('shared.devices.open_camera') as opened:
             opened.return_value.__enter__.return_value = self.container()
             with patch('shared.devices.camera_frames', return_value=iter([self.frame()])):
-                camera._capture()
+                camera.capture_loop()
         opened.assert_called_once_with('MacBook Pro Camera', 8, 6, 30)
         self.assertEqual(camera.read().rgb.shape, (6, 8, 3))
 
@@ -107,7 +107,7 @@ class CameraTests(unittest.TestCase):
         with patch('shared.devices.open_camera') as opened:
             opened.return_value.__enter__.return_value = self.container()
             with patch('shared.devices.camera_frames', return_value=iter([self.frame(16, 12)])):
-                camera._capture()
+                camera.capture_loop()
         with self.assertRaisesRegex(ConnectionError, 'different dimensions'):
             camera.read()
         self.assertTrue(camera.ready.is_set())

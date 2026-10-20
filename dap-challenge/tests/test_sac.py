@@ -182,7 +182,7 @@ class SACLearnerTests(unittest.TestCase):
     def test_actor_update_does_not_modify_critics_or_leave_critic_grads(self):
         before = deepcopy(self.learner.critics.state_dict())
         batch = self.learner.replay.sample(2, torch.device('cpu'))
-        self.learner._update_actor(batch)
+        self.learner.update_actor(batch)
         for key, value in self.learner.critics.state_dict().items():
             torch.testing.assert_close(value, before[key], rtol=0, atol=0)
         self.assertTrue(all(parameter.grad is None for parameter in self.learner.critics.parameters()))

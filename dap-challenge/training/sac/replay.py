@@ -138,7 +138,7 @@ class EpisodeReplay:
         self.ends.append(len(self) + count)
         return count
 
-    def _episode(self, index: int) -> ScoredEpisode:
+    def get_episode(self, index: int) -> ScoredEpisode:
         record = self.records[index]
         key = record['episode_id']
         if key not in self.cache:
@@ -164,7 +164,7 @@ class EpisodeReplay:
             time_index = index - (self.ends[episode_index - 1] if episode_index else 0)
             selected.setdefault(episode_index, []).append((row, time_index))
         for episode_index, rows_and_times in selected.items():
-            episode = self._episode(episode_index)
+            episode = self.get_episode(episode_index)
             for row, time_index in rows_and_times:
                 rows = torch.arange(time_index - self.history_length + 1, time_index + 1).clamp_min(0)
                 next_rows = torch.arange(time_index - self.history_length + 2, time_index + 2).clamp_min(0)

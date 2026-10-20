@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from torch.optim import Optimizer
 
-from shared.config import _plain_config
+from shared.config import plain_config
 from .randomness import capture_rng_state, restore_rng_state
 from .utils import atomic_torch_save
 
@@ -47,7 +47,7 @@ def save_checkpoint(
         "models": {name: model.state_dict() for name, model in models.items()},
         "model_training": {name: model.training for name, model in models.items()},
         "optimizers": {name: optimizer.state_dict() for name, optimizer in optimizers.items()},
-        "config": _plain_config(config),
+        "config": plain_config(config),
         "progress": dict(progress),
         "extra_state": dict(extra_state) if extra_state is not None else {},
         "rng": capture_rng_state(),

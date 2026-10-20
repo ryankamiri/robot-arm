@@ -47,7 +47,7 @@ class RuntimeSession:
                       'positions': None, 'requested_target': None, 'sent_target': None,
                       'diagnostics': {'iterations': 0, 'missed_deadlines': 0, 'consecutive_misses': 0,
                                       'cycle_ms': 0.0, 'prediction_ms': 0.0, 'camera_age_s': 0.0, 'limited_commands': 0}}
-        self.thread = Thread(target=self._run, name='policy-runtime', daemon=True)
+        self.thread = Thread(target=self.run_loop, name='policy-runtime', daemon=True)
 
     def start(self) -> None:
         self.thread.start()
@@ -64,7 +64,7 @@ class RuntimeSession:
         with self.lock:
             return {**deepcopy(self.state), 'settings': deepcopy(self.settings)}
 
-    def _update(self, **values: Any) -> None:
+    def update_state(self, **values: Any) -> None:
         with self.lock:
             self.state.update(values)
 
@@ -109,15 +109,15 @@ class RuntimeSession:
         """Stage a stable snapshot during an attempt or adopt it while idle."""
         return self.request('publish', {'runner': runner})
 
-    def _adopt(self, runner: PolicyRunner) -> None:
+    def adopt_policy(self, runner: PolicyRunner) -> None:
         if isinstance(runner, PolicyRunner):
             runner.to_device(self.settings['policy']['device'])
         runner.reset()
         self.runner = runner
         self.pending_runner = None
-        self._update(policy_version=runner.version, pending_policy_version=None)
+        self.update_state(policy_version=runner.version, pending_policy_version=None)
 
-    def _stage_publication(self, runner: PolicyRunner) -> None:
+    def stage_publication(self, runner: PolicyRunner) -> None:
         publication = getattr(runner, 'publication', None)
         if publication is not None:
             previous = self.publications.get(publication.run_id)
@@ -133,35 +133,35 @@ class RuntimeSession:
                     return
         if self.state['phase'] in ('running', 'resetting', 'fault'):
             self.pending_runner = runner
-            self._update(pending_policy_version=runner.version)
+            self.update_state(pending_policy_version=runner.version)
         else:
-            self._adopt(runner)
+            self.adopt_policy(runner)
         if publication is not None:
             self.publications[publication.run_id] = (publication.actor_updates, publication.digest)
 
-    def _signature(self) -> dict:
+    def follower_signature(self) -> dict:
         return deepcopy({'follower': self.metadata['follower'], 'calibration': self.metadata['calibration']['follower'],
                          'joint_names': list(JOINT_NAMES)})
 
-    def _hold(self) -> None:
-        self._update(hold_confirmed=False)
+    def hold_position(self) -> None:
+        self.update_state(hold_confirmed=False)
         positions = self.devices.read_positions()
         normalize_controller(torch.tensor(positions, dtype=torch.float32), JOINT_NAMES)
         sent = self.devices.send_target(positions)
-        self._update(positions=positions, sent_target=sent, hold_confirmed=True)
+        self.update_state(positions=positions, sent_target=sent, hold_confirmed=True)
         if self.runner is not None:
             self.runner.reset()
 
-    def _fault(self, error: Exception) -> None:
+    def handle_fault(self, error: Exception) -> None:
         self.motion_cancel.set()
         message = str(error)
         try:
-            self._hold()
+            self.hold_position()
         except Exception as failure:
             message += f'; HOLD UNCONFIRMED: {failure}'
-        self._update(phase='fault', error=message)
+        self.update_state(phase='fault', error=message)
 
-    def _disconnect(self) -> None:
+    def disconnect(self) -> None:
         if self.devices is not None:
             self.devices.disconnect()
             self.devices = None
@@ -170,11 +170,11 @@ class RuntimeSession:
         self.frames = None
         if self.runner is not None:
             self.runner.reset()
-        self._update(connected=False, phase='disconnected', hold_confirmed=False, positions=None)
+        self.update_state(connected=False, phase='disconnected', hold_confirmed=False, positions=None)
 
-    def _command(self, command: str, payload: dict) -> None:
+    def handle_command(self, command: str, payload: dict) -> None:
         if command == 'publish':
-            self._stage_publication(payload['runner'])
+            self.stage_publication(payload['runner'])
             return
         if command == 'load':
             if self.state['phase'] in ('running', 'resetting'):
@@ -183,7 +183,7 @@ class RuntimeSession:
             if self.devices is not None and payload.get('client_id') != self.client_id:
                 raise ValueError('This browser does not own the inference session.')
 
-            self._adopt(payload['runner'])
+            self.adopt_policy(payload['runner'])
             return
         if command == 'connect':
             if self.devices is not None:
@@ -196,36 +196,36 @@ class RuntimeSession:
             try:
                 self.devices = self.factory(payload['settings'])
                 self.metadata = self.devices.connect()
-                self._hold()
+                self.hold_position()
                 self.client_id = payload['client_id']
                 self.heartbeat_at = self.clock()
-                self._update(connected=True, phase='holding', error=None)
+                self.update_state(connected=True, phase='holding', error=None)
             except Exception:
-                self._disconnect()
+                self.disconnect()
                 raise
             return
         if self.devices is None or payload.get('client_id') != self.client_id:
             raise ValueError('Connect this browser to the follower first.')
 
         if command == 'disconnect':
-            self._disconnect()
+            self.disconnect()
         elif command == 'stop':
-            self._hold()
-            self._update(phase='holding', error=None)
+            self.hold_position()
+            self.update_state(phase='holding', error=None)
         elif command == 'capture_pose':
             if self.state['phase'] in ('running', 'resetting'):
                 raise ValueError('Stop motion before capturing the starting pose.')
 
-            self._hold()
-            pose = {'positions': self.state['positions'], 'identity': self._signature()}
+            self.hold_position()
+            pose = {'positions': self.state['positions'], 'identity': self.follower_signature()}
             save_config(pose, self.pose_path)
             self.pose = pose
-            self._update(starting_pose=pose)
+            self.update_state(starting_pose=pose)
         elif command in ('start', 'reset'):
             if self.state['phase'] == 'resetting' or (command == 'start' and self.state['phase'] == 'running'):
                 raise ValueError('Stop the current attempt first.')
 
-            if self.pose is None or self.pose['identity'] != self._signature():
+            if self.pose is None or self.pose['identity'] != self.follower_signature():
                 raise ValueError('Capture a starting pose for this follower and calibration first.')
 
             if self.clock() - self.heartbeat_at > self.settings['control']['browser_timeout_s']:
@@ -241,21 +241,21 @@ class RuntimeSession:
                     raise ValueError('Return to the captured starting pose before starting the policy.')
 
                 if self.pending_runner is not None:
-                    self._adopt(self.pending_runner)
+                    self.adopt_policy(self.pending_runner)
                 self.runner.reset()
-                self._update(phase='running', action_mode=payload['mode'], error=None, hold_confirmed=False)
+                self.update_state(phase='running', action_mode=payload['mode'], error=None, hold_confirmed=False)
             else:
                 if self.runner is not None:
                     self.runner.reset()
                 self.reset_started = self.clock()
                 self.reset_target = positions.copy()
-                self._update(phase='resetting', error=None, hold_confirmed=False)
+                self.update_state(phase='resetting', error=None, hold_confirmed=False)
             self.state['diagnostics']['consecutive_misses'] = 0
             self.motion_cancel.clear()
         else:
             raise ValueError('Unknown inference command.')
 
-    def _tick(self, started: float, elapsed: float) -> None:
+    def tick(self, started: float, elapsed: float) -> None:
         arm, positions, observed = self.devices.observe()
         mac = self.devices.secondary_frame()
         if mac is None:
@@ -284,8 +284,8 @@ class RuntimeSession:
                 raise TimeoutError('Return to start timed out.')
 
             if max(abs(a-b) for a,b in zip(positions,self.pose['positions'],strict=True)) <= control['reset_tolerance']:
-                self._hold()
-                self._update(phase='holding')
+                self.hold_position()
+                self.update_state(phase='holding')
                 return
 
             delta = min(control['max_target_delta'], control['reset_speed_per_second'] * min(elapsed, .1))
@@ -312,11 +312,11 @@ class RuntimeSession:
         sent = self.devices.send_target(targets)
         if self.state['phase'] == 'resetting':
             self.reset_target = list(sent)
-        self._update(requested_target=requested, sent_target=sent)
+        self.update_state(requested_target=requested, sent_target=sent)
         if targets != requested:
             self.state['diagnostics']['limited_commands'] += 1
 
-    def _run(self) -> None:
+    def run_loop(self) -> None:
         period = 1 / self.settings['control']['iterations_per_second']
         previous = self.clock()-period
         try:
@@ -329,16 +329,16 @@ class RuntimeSession:
                 else:
                     if future.set_running_or_notify_cancel():
                         try:
-                            self._command(command,payload)
+                            self.handle_command(command,payload)
                             future.set_result(self.snapshot())
                         except Exception as error:
                             if self.devices is not None and (command in ('stop','disconnect','capture_pose','reset') or not isinstance(error,ValueError)):
-                                self._fault(error)
+                                self.handle_fault(error)
                             future.set_exception(error)
                 if self.devices is not None:
                     active = self.state['phase'] in ('running','resetting')
                     try:
-                        self._tick(started, self.clock()-previous)
+                        self.tick(started, self.clock()-previous)
                         duration = self.clock()-started
                         with self.lock:
                             diagnostics = self.state['diagnostics']
@@ -350,11 +350,11 @@ class RuntimeSession:
                             raise TimeoutError('Repeated control deadlines missed; policy stopped.')
                     except Exception as error:
                         if self.state['phase'] != 'fault':
-                            self._fault(error)
+                            self.handle_fault(error)
                 previous = started
                 self.shutdown.wait(max(0, period-(self.clock()-started)))
         finally:
             try:
-                self._disconnect()
+                self.disconnect()
             except Exception as error:
-                self._update(phase='fault', error=f'Disconnect unconfirmed: {error}')
+                self.update_state(phase='fault', error=f'Disconnect unconfirmed: {error}')

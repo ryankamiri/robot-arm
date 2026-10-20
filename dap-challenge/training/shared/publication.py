@@ -44,12 +44,12 @@ class AsyncPolicyPublisher:
                 self.pending = snapshot
                 self.last_identity = identity
                 if self.worker is None:
-                    self.worker = Thread(target=self._run, name='actor-publisher', daemon=True)
+                    self.worker = Thread(target=self.run_loop, name='actor-publisher', daemon=True)
                     self.worker.start()
                 self.condition.notify_all()
         return {'publication_state': 'queued', 'policy_version': snapshot.version, 'sha256': snapshot.digest}
 
-    def _run(self) -> None:
+    def run_loop(self) -> None:
         while True:
             with self.condition:
                 self.condition.wait_for(lambda: self.pending is not None or self.closing)
